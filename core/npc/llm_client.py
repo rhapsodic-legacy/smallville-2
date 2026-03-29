@@ -1,0 +1,287 @@
+"""
+LLM integration layer.
+
+Wraps the Anthropic Claude API with rate limiting, cost tracking,
+and a prompt template system. Haiku for NPCs, Opus for overseer.
+Pluggable provider interface for future local model support.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+# ---------- Cost tracking ----------
+
+@dataclass
+class UsageRecord:
+    """Single LLM call usage."""
+    model: str
+    input_tokens: int
+    output_tokens: int
+    timestamp: float
+    purpose: str  # e.g. "daily_plan", "conversation", "reflection"
+
+
+@dataclass
+class CostTracker:
+    """Tracks LLM API usage and estimated costs."""
+    records: list[UsageRecord] = field(default_factory=list)
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+
+    # Approximate costs per million tokens (USD)
+    _COST_PER_M_INPUT: dict[str, float] = field(default_factory=lambda: {
+        "claude-haiku-4-5-20251001": 0.80,
+        "claude-sonnet-4-6": 3.0,
+        "claude-opus-4-6": 15.0,
+    })
+    _COST_PER_M_OUTPUT: dict[str, float] = field(default_factory=lambda: {
+        "claude-haiku-4-5-20251001": 4.0,
+        "claude-sonnet-4-6": 15.0,
+        "claude-opus-4-6": 75.0,
+    })
+
+    def record(self, model: str, input_tokens: int, output_tokens: int,
+               purpose: str) -> None:
+        self.records.append(UsageRecord(
+            model=model, input_tokens=input_tokens,
+            output_tokens=output_tokens, timestamp=time.time(),
+            purpose=purpose,
+        ))
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+
+    def estimated_cost_usd(self) -> float:
+        total = 0.0
+        for r in self.records:
+            in_cost = self._COST_PER_M_INPUT.get(r.model, 1.0)
+            out_cost = self._COST_PER_M_OUTPUT.get(r.model, 5.0)
+            total += (r.input_tokens * in_cost + r.output_tokens * out_cost) / 1_000_000
+        return total
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "total_calls": len(self.records),
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "estimated_cost_usd": round(self.estimated_cost_usd(), 4),
+        }
+
+
+# ---------- Rate limiter ----------
+
+class RateLimiter:
+    """Token bucket rate limiter for API calls."""
+
+    def __init__(self, max_calls_per_minute: int = 50):
+        self.max_calls = max_calls_per_minute
+        self._timestamps: list[float] = []
+
+    async def acquire(self) -> None:
+        """Wait until a call slot is available."""
+        now = time.monotonic()
+        # Purge timestamps older than 60 seconds
+        self._timestamps = [t for t in self._timestamps if now - t < 60]
+
+        if len(self._timestamps) >= self.max_calls:
+            wait_time = 60 - (now - self._timestamps[0])
+            if wait_time > 0:
+                logger.debug("Rate limiter: waiting %.1fs", wait_time)
+                await asyncio.sleep(wait_time)
+
+        self._timestamps.append(time.monotonic())
+
+
+# ---------- Provider interface ----------
+
+class LLMProvider(ABC):
+    """Abstract interface for LLM providers."""
+
+    @abstractmethod
+    async def complete(self, system: str, messages: list[dict[str, str]],
+                       max_tokens: int = 300, temperature: float = 0.7,
+                       purpose: str = "general") -> str:
+        """Send a completion request and return the text response."""
+        ...
+
+
+# ---------- Claude provider ----------
+
+class ClaudeProvider(LLMProvider):
+    """Anthropic Claude API provider."""
+
+    # Model tiers
+    NPC_MODEL = "claude-haiku-4-5-20251001"
+    OVERSEER_MODEL = "claude-opus-4-6"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        npc_model: str | None = None,
+        overseer_model: str | None = None,
+        max_calls_per_minute: int = 50,
+    ):
+        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+        self.npc_model = npc_model or self.NPC_MODEL
+        self.overseer_model = overseer_model or self.OVERSEER_MODEL
+        self.cost_tracker = CostTracker()
+        self._rate_limiter = RateLimiter(max_calls_per_minute)
+        self._client = None
+
+    def _get_client(self):
+        """Lazy-initialise the Anthropic client."""
+        if self._client is None:
+            try:
+                import anthropic
+                self._client = anthropic.AsyncAnthropic(api_key=self.api_key)
+            except ImportError:
+                raise RuntimeError(
+                    "anthropic package not installed. Run: pip install anthropic"
+                )
+        return self._client
+
+    async def complete(
+        self,
+        system: str,
+        messages: list[dict[str, str]],
+        max_tokens: int = 300,
+        temperature: float = 0.7,
+        purpose: str = "general",
+        use_overseer_model: bool = False,
+    ) -> str:
+        """Call Claude API and return the text response."""
+        model = self.overseer_model if use_overseer_model else self.npc_model
+        client = self._get_client()
+        await self._rate_limiter.acquire()
+
+        try:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+                messages=messages,
+            )
+
+            text = response.content[0].text
+            self.cost_tracker.record(
+                model=model,
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                purpose=purpose,
+            )
+            logger.debug(
+                "LLM [%s] %s: %d in / %d out tokens",
+                purpose, model,
+                response.usage.input_tokens, response.usage.output_tokens,
+            )
+            return text
+
+        except Exception as e:
+            logger.error("LLM call failed [%s]: %s", purpose, e)
+            raise
+
+
+# ---------- Mock provider ----------
+# Full implementation in mock_provider.py; re-exported here for convenience.
+
+from core.npc.mock_provider import MockProvider  # noqa: E402
+
+
+# ---------- Prompt templates ----------
+
+PROMPT_TEMPLATES: dict[str, str] = {
+    "daily_plan": (
+        "You are {name}, a {age}-year-old {occupation} living in Smallville.\n"
+        "{backstory}\n\n"
+        "Personality: {personality}\n"
+        "Current goals: {goals}\n"
+        "Current state — Health: {health}, Energy: {energy}, Hunger: {hunger}\n"
+        "Gold: {gold}\n"
+        "{relationship_summary}\n\n"
+        "It is the start of day {day}. The weather is fair.\n"
+        "Create a realistic daily schedule with 5-8 activities.\n"
+        "Each line: time range, activity, location.\n"
+        "Consider your occupation, personality, needs, goals, and relationships."
+    ),
+
+    "task_decomposition": (
+        "You are {name}, {occupation} in Smallville.\n"
+        "Your current scheduled activity: {activity} at {location}\n"
+        "Time slot: {slot}\n\n"
+        "Break this into a specific, concrete action you should do right now.\n"
+        "Reply with just the action in 5-10 words."
+    ),
+
+    "conversation_initiate": (
+        "You are {name}, a {age}-year-old {occupation} in Smallville.\n"
+        "Personality: {personality}\n"
+        "{backstory}\n\n"
+        "You have encountered {other_name} ({other_occupation}).\n"
+        "{relationship_context}\n"
+        "Recent observations: {recent_perceptions}\n\n"
+        "Start a brief, natural conversation. Keep it to 1-2 sentences.\n"
+        "Stay in character."
+    ),
+
+    "conversation_respond": (
+        "You are {name}, a {age}-year-old {occupation} in Smallville.\n"
+        "Personality: {personality}\n\n"
+        "You are talking with {other_name} ({other_occupation}).\n"
+        "{relationship_context}\n"
+        "{other_name} said: \"{other_message}\"\n\n"
+        "Respond naturally in 1-2 sentences. Stay in character."
+    ),
+
+    "reaction": (
+        "You are {name}, {occupation} in Smallville.\n"
+        "You are currently: {current_activity}\n\n"
+        "You notice: {observation}\n\n"
+        "How do you react? Choose one:\n"
+        "- continue_current (keep doing what you're doing)\n"
+        "- approach (go investigate or interact)\n"
+        "- avoid (move away)\n"
+        "- observe (watch from a distance)\n\n"
+        "Reply with just the action word."
+    ),
+
+    "importance": (
+        "On a scale of 1 to 10, where 1 is mundane (e.g. brushing teeth) "
+        "and 10 is life-changing (e.g. a death or marriage), rate the "
+        "poignancy of the following event:\n\n"
+        "{description}\n\n"
+        "Reply with just the number."
+    ),
+
+    "task_decompose": (
+        "You are {name}, a {occupation} in the town of Smallville.\n"
+        "Personality: {personality}\n\n"
+        "Your current schedule says: \"{activity}\" during the {slot} "
+        "at {location}.\n"
+        "Available objects at this location: {objects}\n\n"
+        "Recent context:\n{memory_context}\n\n"
+        "Break this into 3-5 specific, concrete sub-tasks you would "
+        "actually do. For each, give:\n"
+        "description | duration_minutes | activity_state\n\n"
+        "Activity states: idle, working, eating, sleeping, talking, gathering\n"
+        "Be specific to your occupation and personality. "
+        "Reference the objects available at this location where relevant."
+    ),
+}
+
+
+def format_prompt(template_name: str, **kwargs) -> str:
+    """Fill a prompt template with NPC-specific values."""
+    template = PROMPT_TEMPLATES.get(template_name)
+    if template is None:
+        raise ValueError(f"Unknown prompt template: {template_name}")
+    return template.format(**kwargs)

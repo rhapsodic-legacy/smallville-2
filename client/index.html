@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smallville 2 — Self-Evolving NPC Ecosystem</title>
+    <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+    <div id="game-container">
+        <!-- Three.js canvas renders here -->
+        <canvas id="game-canvas"></canvas>
+
+        <!-- HUD overlay -->
+        <div id="hud">
+            <div id="hud-time">Day 1 — Morning</div>
+            <div id="hud-gold">Gold: 0</div>
+            <div id="hud-status">Connecting...</div>
+            <div id="hud-memory-hint">[M] Memory Inspector</div>
+        </div>
+
+        <!-- Chat interface -->
+        <div id="chat-panel" class="hidden">
+            <div id="chat-history"></div>
+            <input type="text" id="chat-input" placeholder="Say something..." />
+        </div>
+
+        <!-- Notification feed -->
+        <div id="notifications"></div>
+    </div>
+
+    <!-- Three.js from CDN (no build step) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.164.1/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.164.1/examples/jsm/"
+        }
+    }
+    </script>
+
+    <!-- Game modules -->
+    <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>
