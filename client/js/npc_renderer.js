@@ -159,14 +159,26 @@ export class NPCRenderer {
             this.moveStates.set(data.npc_id, {
                 x: data.x,
                 z: data.z,
-                // Waypoint queue — trail tiles are appended here each tick.
-                // Client walks through them in order at constant speed.
-                waypoints: trail.length > 0
-                    ? trail.map(wp => [wp[0], wp[1]])
-                    : [],
+                // First appearance — snap to position, ignore any trail
+                // so NPCs don't float from origin on page load.
+                waypoints: [],
                 walkSpeed: data.move_speed || 3.0,
                 activity: data.activity,
+                isNew: true,
             });
+            return;
+        }
+
+        // Second update after creation — clear isNew flag.
+        // Skip trail for this one tick so the NPC snaps to its real
+        // server position before starting to lerp.
+        if (existing.isNew) {
+            existing.isNew = false;
+            existing.x = data.x;
+            existing.z = data.z;
+            existing.waypoints = [];
+            existing.activity = data.activity;
+            existing.walkSpeed = data.move_speed || 3.0;
             return;
         }
 

@@ -432,22 +432,99 @@ class TownGenerator:
     # ---------- Roads ----------
 
     def _connect_roads(self) -> None:
-        """Build roads connecting all building doors to the town centre."""
+        """Build roads connecting all building doors to the town centre.
+
+        Uses A* pathfinding around buildings instead of L-shaped stamping
+        so roads never visually pass through or under buildings.
+        """
         centre = (0, 0)
 
-        for building in self.buildings:
-            # Connect from the approach tile (one south of door) to town centre.
-            # The door itself is on the building's south wall; the approach tile
-            # is the first walkable tile outside the building.
-            approach_z = building.door_z + 1
-            self._lay_road(building.door_x, approach_z, centre[0], centre[1])
+        # Build a set of all building footprint tiles (walls + interiors)
+        # that roads must route around.
+        building_tiles: set[tuple[int, int]] = set()
+        for b in self.buildings:
+            for dx in range(b.width):
+                for dz in range(b.height):
+                    building_tiles.add((b.x + dx, b.z + dz))
 
-    def _lay_road(self, x1: int, z1: int, x2: int, z2: int) -> None:
-        """Lay an L-shaped road between two points."""
-        # Horizontal first, then vertical
+        for building in self.buildings:
+            approach_z = building.door_z + 1
+            path = self._find_road_path(
+                building.door_x, approach_z,
+                centre[0], centre[1],
+                building_tiles,
+            )
+            if path:
+                for px, pz in path:
+                    self._set_road_tile(px, pz)
+            else:
+                # Fallback: L-shaped if pathfinding fails (shouldn't happen)
+                self._lay_road_fallback(
+                    building.door_x, approach_z,
+                    centre[0], centre[1],
+                )
+
+    def _find_road_path(
+        self, x1: int, z1: int, x2: int, z2: int,
+        building_tiles: set[tuple[int, int]],
+    ) -> list[tuple[int, int]] | None:
+        """A* pathfinding for road routing that avoids building footprints."""
+        import heapq
+
+        start = (x1, z1)
+        goal = (x2, z2)
+        if start == goal:
+            return [start]
+
+        counter = 0
+        open_set: list[tuple[float, int, tuple[int, int]]] = []
+        heapq.heappush(open_set, (0.0, counter, start))
+        came_from: dict[tuple[int, int], tuple[int, int]] = {}
+        g_score: dict[tuple[int, int], float] = {start: 0.0}
+
+        directions = [(0, 1), (0, -1), (1, 0), (-1, 0)]
+
+        while open_set:
+            _, _, current = heapq.heappop(open_set)
+            if current == goal:
+                # Reconstruct path
+                path = [current]
+                while current in came_from:
+                    current = came_from[current]
+                    path.append(current)
+                path.reverse()
+                return path
+
+            cx, cz = current
+            for dx, dz in directions:
+                nx, nz = cx + dx, cz + dz
+                neighbour = (nx, nz)
+
+                # Must be in bounds
+                tile = self.grid.get_tile(nx, nz)
+                if tile is None:
+                    continue
+                # Cannot route through water
+                if tile.terrain == Terrain.WATER:
+                    continue
+                # Cannot route through building footprints
+                if neighbour in building_tiles:
+                    continue
+
+                tentative_g = g_score[current] + 1.0
+                if tentative_g < g_score.get(neighbour, float("inf")):
+                    came_from[neighbour] = current
+                    g_score[neighbour] = tentative_g
+                    h = abs(nx - x2) + abs(nz - z2)
+                    counter += 1
+                    heapq.heappush(open_set, (tentative_g + h, counter, neighbour))
+
+        return None
+
+    def _lay_road_fallback(self, x1: int, z1: int, x2: int, z2: int) -> None:
+        """L-shaped fallback if pathfinding fails."""
         step_x = 1 if x2 >= x1 else -1
         step_z = 1 if z2 >= z1 else -1
-
         x = x1
         while x != x2:
             self._set_road_tile(x, z1)

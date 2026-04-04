@@ -250,7 +250,12 @@ def _arrive(
     current_slot: str,
     all_npcs: list[NPC],
 ) -> None:
-    """Handle arrival at destination. Nudge if tile occupied, then settle."""
+    """Handle arrival at destination. Nudge if tile occupied, then settle.
+
+    When nudged to a free tile, persist that position on the current
+    schedule entry so future re-dispatches (post-conversation, etc.)
+    don't send the NPC back to the original occupied tile.
+    """
     from core.world.spatial_awareness import get_occupied_tiles, find_rest_tile
 
     _clear_path(npc)
@@ -266,6 +271,13 @@ def _arrive(
             npc._tick_trail = [(new_x, new_z)]
             npc.x = float(new_x)
             npc.z = float(new_z)
+
+    # Persist final position on current schedule entry so re-dispatches
+    # (post-conversation, advance) use the resolved tile, not the original.
+    if npc.daily_schedule and npc.schedule_index < len(npc.daily_schedule):
+        entry = npc.daily_schedule[npc.schedule_index]
+        entry.target_x = npc.tile_x
+        entry.target_z = npc.tile_z
 
     set_activity_for_location(npc, current_slot)
     logger.info(
