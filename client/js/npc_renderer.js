@@ -1,9 +1,9 @@
 /**
  * Smallville 2 — NPC Renderer
  *
- * Stanford approach: server sends tile position + trail (tiles traversed
- * this tick, max 2-3). Client walks through the trail waypoints smoothly.
- * No full path, no complex sync state, no snap-back.
+ * Stanford approach: server sends tile position each tick. Client
+ * continuously lerps toward the server position at the NPC's walk
+ * speed. No trail system, no start-stop — just smooth movement.
  */
 
 import * as THREE from 'three';
@@ -11,12 +11,6 @@ import { ProceduralAssetProvider } from './procedural_assets.js';
 
 // If the NPC needs to cover more than this distance, teleport instantly.
 const TELEPORT_DISTANCE = 4.0;
-
-// Tick interval (must match server TICK_INTERVAL)
-const TICK_INTERVAL = 1.0;
-
-// Arrive at trail end slightly before next tick
-const ARRIVAL_FACTOR = 0.85;
 
 
 // ---------- NPC Renderer ----------
@@ -99,29 +93,26 @@ export class NPCRenderer {
             const group = mesh.group;
             const anim = mesh.animation;
 
-            // --- Walk through trail waypoints ---
-            this._walkTrail(state, group, deltaTime);
+            // --- Smooth lerp toward target position ---
+            const isMoving = this._lerpToTarget(state, group, deltaTime);
 
             // --- Facing direction ---
-            if (state.trail.length > 0 && state.trailIndex < state.trail.length) {
-                const wp = state.trail[state.trailIndex];
-                const dx = wp[0] - state.x;
-                const dz = wp[1] - state.z;
-                if (Math.abs(dx) > 0.05 || Math.abs(dz) > 0.05) {
-                    const targetAngle = Math.atan2(dx, dz);
-                    let diff = targetAngle - group.rotation.y;
-                    while (diff > Math.PI) diff -= 2 * Math.PI;
-                    while (diff < -Math.PI) diff += 2 * Math.PI;
-                    group.rotation.y += diff * 0.15;
-                }
+            const wp = state.waypoints.length > 0 ? state.waypoints[0] : null;
+            const dx = wp ? wp[0] - state.x : 0;
+            const dz = wp ? wp[1] - state.z : 0;
+            if (Math.abs(dx) > 0.05 || Math.abs(dz) > 0.05) {
+                const targetAngle = Math.atan2(dx, dz);
+                let diff = targetAngle - group.rotation.y;
+                while (diff > Math.PI) diff -= 2 * Math.PI;
+                while (diff < -Math.PI) diff += 2 * Math.PI;
+                group.rotation.y += diff * 0.15;
             }
 
             // --- Bob animation ---
-            const isWalking = state.trail.length > 0 && state.trailIndex < state.trail.length;
             if (mesh.activity === 'idle' || mesh.activity === 'talking') {
                 mesh.bobPhase += deltaTime * anim.idle_bob_speed;
                 group.position.y = anim.base_y + Math.sin(mesh.bobPhase) * anim.idle_bob_amplitude;
-            } else if (mesh.activity === 'walking' || isWalking) {
+            } else if (mesh.activity === 'walking' || isMoving) {
                 mesh.bobPhase += deltaTime * anim.walk_bob_speed;
                 group.position.y = anim.base_y + Math.abs(Math.sin(mesh.bobPhase)) * anim.walk_bob_amplitude;
             } else {
@@ -156,11 +147,9 @@ export class NPCRenderer {
     /**
      * Update movement from server tick.
      *
-     * Server sends trail: the exact tiles traversed this tick (max 2-3).
-     * Client walks through them in order. When trail is empty, NPC is
-     * stationary — snap to server position.
-     *
-     * No full remaining path. No complex sync. No snap-back possible.
+     * Trail waypoints ensure NPCs follow the A* path through doors
+     * (no wall clipping). Constant walk speed ensures smooth movement
+     * without start-stop gaps.
      */
     _updateMoveState(data) {
         const trail = data.trail || [];
@@ -170,24 +159,34 @@ export class NPCRenderer {
             this.moveStates.set(data.npc_id, {
                 x: data.x,
                 z: data.z,
-                trail: trail,
-                trailIndex: 0,
-                walkSpeed: 0,
+                // Waypoint queue — trail tiles are appended here each tick.
+                // Client walks through them in order at constant speed.
+                waypoints: trail.length > 0
+                    ? trail.map(wp => [wp[0], wp[1]])
+                    : [],
+                walkSpeed: data.move_speed || 3.0,
                 activity: data.activity,
             });
             return;
         }
 
         existing.activity = data.activity;
+        existing.walkSpeed = data.move_speed || 3.0;
 
         if (trail.length > 0) {
-            // Compute total trail distance for walk speed
+            // Compute total distance from client position through new waypoints
+            let checkX = existing.x, checkZ = existing.z;
+            if (existing.waypoints.length > 0) {
+                const last = existing.waypoints[existing.waypoints.length - 1];
+                checkX = last[0];
+                checkZ = last[1];
+            }
             let totalDist = 0;
-            let px = existing.x, pz = existing.z;
+            let px = checkX, pz = checkZ;
             for (const wp of trail) {
-                const dx = wp[0] - px;
-                const dz = wp[1] - pz;
-                totalDist += Math.sqrt(dx * dx + dz * dz);
+                const ddx = wp[0] - px;
+                const ddz = wp[1] - pz;
+                totalDist += Math.sqrt(ddx * ddx + ddz * ddz);
                 px = wp[0];
                 pz = wp[1];
             }
@@ -197,53 +196,58 @@ export class NPCRenderer {
                 const last = trail[trail.length - 1];
                 existing.x = last[0];
                 existing.z = last[1];
-                existing.trail = [];
-                existing.trailIndex = 0;
-                existing.walkSpeed = 0;
+                existing.waypoints = [];
             } else {
-                existing.trail = trail;
-                existing.trailIndex = 0;
-                // Walk through trail to arrive before next tick
-                existing.walkSpeed = totalDist > 0.01
-                    ? totalDist / (TICK_INTERVAL * ARRIVAL_FACTOR)
-                    : data.move_speed || 2.0;
+                // Append new waypoints — client walks through them in order
+                for (const wp of trail) {
+                    existing.waypoints.push([wp[0], wp[1]]);
+                }
             }
         } else {
-            // NPC didn't move this tick — snap to server position
-            existing.trail = [];
-            existing.trailIndex = 0;
-            existing.walkSpeed = 0;
-            existing.x = data.x;
-            existing.z = data.z;
+            // No trail — check for position drift (overlap nudge, etc.)
+            const dx = data.x - existing.x;
+            const dz = data.z - existing.z;
+            const drift = Math.sqrt(dx * dx + dz * dz);
+
+            if (drift > TELEPORT_DISTANCE) {
+                existing.x = data.x;
+                existing.z = data.z;
+                existing.waypoints = [];
+            } else if (drift > 0.1 && existing.waypoints.length === 0) {
+                // Small nudge — walk smoothly to corrected position
+                existing.waypoints.push([data.x, data.z]);
+            }
         }
     }
 
     /**
-     * Walk through trail waypoints, frame by frame.
+     * Walk through waypoint queue at constant speed each frame.
      *
-     * Each waypoint is an actual tile on the A* path, so movement
-     * follows the path exactly — no building clips.
+     * Waypoints come from server trail data and guide NPCs through
+     * doorways (no wall clipping). Constant walk speed gives smooth
+     * continuous movement without start-stop gaps.
+     *
+     * Returns true if NPC is currently moving.
      */
-    _walkTrail(state, group, deltaTime) {
-        if (!state.trail.length || state.trailIndex >= state.trail.length) {
-            // At rest — hold current position
-            group.position.x = state.x;
-            group.position.z = state.z;
-            return;
+    _lerpToTarget(state, group, deltaTime) {
+        if (state.waypoints.length === 0) {
+            group.position.x = state.x + 0.5;
+            group.position.z = state.z + 0.5;
+            return false;
         }
 
         let remaining = state.walkSpeed * deltaTime;
 
-        while (remaining > 0 && state.trailIndex < state.trail.length) {
-            const wp = state.trail[state.trailIndex];
+        while (remaining > 0 && state.waypoints.length > 0) {
+            const wp = state.waypoints[0];
             const dx = wp[0] - state.x;
             const dz = wp[1] - state.z;
             const dist = Math.sqrt(dx * dx + dz * dz);
 
-            if (dist < 0.01) {
+            if (dist < 0.02) {
                 state.x = wp[0];
                 state.z = wp[1];
-                state.trailIndex++;
+                state.waypoints.shift();
                 continue;
             }
 
@@ -251,7 +255,7 @@ export class NPCRenderer {
                 state.x = wp[0];
                 state.z = wp[1];
                 remaining -= dist;
-                state.trailIndex++;
+                state.waypoints.shift();
             } else {
                 const frac = remaining / dist;
                 state.x += dx * frac;
@@ -260,8 +264,9 @@ export class NPCRenderer {
             }
         }
 
-        group.position.x = state.x;
-        group.position.z = state.z;
+        group.position.x = state.x + 0.5;
+        group.position.z = state.z + 0.5;
+        return true;
     }
 
     // ---------- Mesh creation ----------
@@ -295,7 +300,8 @@ export class NPCRenderer {
         indicator.position.y = -0.3;
         group.add(indicator);
 
-        group.position.set(data.x, asset.animation.base_y, data.z);
+        // +0.5 aligns NPC with tile centre (terrain tiles render at x+0.5, z+0.5)
+        group.position.set(data.x + 0.5, asset.animation.base_y, data.z + 0.5);
         this.npcGroup.add(group);
 
         this.npcMeshes.set(data.npc_id, {

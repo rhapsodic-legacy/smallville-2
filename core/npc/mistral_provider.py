@@ -16,7 +16,7 @@ import os
 import time
 from typing import Any
 
-from core.npc.llm_client import LLMProvider, CostTracker, RateLimiter
+from core.npc.llm_client import LLMProvider, CostTracker, RateLimiter, _response_cache
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,12 @@ class MistralProvider(LLMProvider):
         use_overseer_model: bool = False,
     ) -> str:
         """Call Mistral API and return the text response."""
+        # Check cache first
+        cached = _response_cache.get(system, messages, temperature, purpose)
+        if cached is not None:
+            logger.debug("Mistral cache hit [%s]", purpose)
+            return cached
+
         model = self.overseer_model if use_overseer_model else self.npc_model
         client = self._get_client()
         await self._rate_limiter.acquire()
@@ -105,6 +111,9 @@ class MistralProvider(LLMProvider):
                 "Mistral [%s] %s: %d in / %d out tokens",
                 purpose, model, input_tokens, output_tokens,
             )
+
+            # Store in cache
+            _response_cache.put(system, messages, temperature, purpose, text)
             return text
 
         except Exception as e:

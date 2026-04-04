@@ -9,14 +9,105 @@ Pluggable provider interface for future local model support.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import time
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ---------- Response cache ----------
+
+class ResponseCache:
+    """
+    In-memory LRU cache for LLM responses.
+
+    Keyed on (system_prompt, messages, temperature, purpose).
+    TTL is configurable per purpose — conversations expire quickly,
+    daily plans last all day, town parsing lasts forever.
+    """
+
+    # TTL in seconds per purpose (0 = no caching for that purpose)
+    DEFAULT_TTLS: dict[str, float] = {
+        "daily_plan": 1200.0,       # 20 min (one game day)
+        "task_decompose": 600.0,    # 10 min (activity repetition)
+        "town_prompt_parse": 0.0,   # forever (immutable)
+        "reflection": 300.0,        # 5 min
+        "reaction": 120.0,          # 2 min
+        "conversation": 0.0,        # no caching — every convo is unique
+        "general": 60.0,
+    }
+
+    def __init__(self, max_entries: int = 500):
+        self._cache: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        self._max_entries = max_entries
+        self.hits: int = 0
+        self.misses: int = 0
+
+    def _make_key(
+        self, system: str, messages: list[dict[str, str]],
+        temperature: float, purpose: str,
+    ) -> str:
+        raw = json.dumps(
+            {"s": system, "m": messages, "t": temperature, "p": purpose},
+            sort_keys=True,
+        )
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def get(
+        self, system: str, messages: list[dict[str, str]],
+        temperature: float, purpose: str,
+    ) -> str | None:
+        ttl = self.DEFAULT_TTLS.get(purpose)
+        if ttl == 0.0:
+            # Purpose disabled from caching (conversation) or forever
+            if purpose == "conversation":
+                self.misses += 1
+                return None
+            # town_prompt_parse: ttl=0 means forever
+        key = self._make_key(system, messages, temperature, purpose)
+        entry = self._cache.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+        response, timestamp = entry
+        if ttl and ttl > 0 and (time.monotonic() - timestamp) > ttl:
+            del self._cache[key]
+            self.misses += 1
+            return None
+        self._cache.move_to_end(key)
+        self.hits += 1
+        return response
+
+    def put(
+        self, system: str, messages: list[dict[str, str]],
+        temperature: float, purpose: str, response: str,
+    ) -> None:
+        if purpose == "conversation":
+            return  # Never cache conversations
+        key = self._make_key(system, messages, temperature, purpose)
+        self._cache[key] = (response, time.monotonic())
+        if len(self._cache) > self._max_entries:
+            self._cache.popitem(last=False)
+
+    def stats(self) -> dict[str, Any]:
+        total = self.hits + self.misses
+        return {
+            "entries": len(self._cache),
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": round(self.hits / total, 3) if total > 0 else 0.0,
+        }
+
+
+# Shared cache instance — all providers use the same cache
+_response_cache = ResponseCache()
 
 
 # ---------- Cost tracking ----------
@@ -159,6 +250,12 @@ class ClaudeProvider(LLMProvider):
         use_overseer_model: bool = False,
     ) -> str:
         """Call Claude API and return the text response."""
+        # Check cache first
+        cached = _response_cache.get(system, messages, temperature, purpose)
+        if cached is not None:
+            logger.debug("LLM cache hit [%s]", purpose)
+            return cached
+
         model = self.overseer_model if use_overseer_model else self.npc_model
         client = self._get_client()
         await self._rate_limiter.acquire()
@@ -184,6 +281,9 @@ class ClaudeProvider(LLMProvider):
                 purpose, model,
                 response.usage.input_tokens, response.usage.output_tokens,
             )
+
+            # Store in cache
+            _response_cache.put(system, messages, temperature, purpose, text)
             return text
 
         except Exception as e:
@@ -277,6 +377,11 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "Reference the objects available at this location where relevant."
     ),
 }
+
+
+def get_cache_stats() -> dict[str, Any]:
+    """Return LLM response cache statistics."""
+    return _response_cache.stats()
 
 
 def format_prompt(template_name: str, **kwargs) -> str:

@@ -32,11 +32,11 @@ class BuildingDef:
 DEFAULT_BUILDINGS: list[BuildingDef] = [
     BuildingDef("tavern", "Tavern", 4, 4, required=True, sector="market"),
     BuildingDef("blacksmith", "Blacksmith", 3, 3, required=True, sector="market"),
-    BuildingDef("market_stall", "Market Stall", 2, 2, required=True,
+    BuildingDef("market_stall", "Market Stall", 3, 3, required=True,
                 max_count=3, sector="market"),
     BuildingDef("church", "Church", 5, 5, sector="centre"),
     BuildingDef("town_hall", "Town Hall", 4, 4, sector="centre"),
-    BuildingDef("home", "Home", 2, 3, max_count=20, sector="residential"),
+    BuildingDef("home", "Home", 3, 3, max_count=20, sector="residential"),
     BuildingDef("farm", "Farm", 4, 4, max_count=4, sector="outskirts"),
 ]
 
@@ -83,15 +83,54 @@ BUILDING_OBJECTS: dict[str, list[str]] = {
 }
 
 
+def _building_interior_tiles(
+    ox: int, oz: int, w: int, h: int, door_x: int, door_z: int,
+) -> set[tuple[int, int]]:
+    """Compute passable interior tiles for a building footprint.
+
+    A tile is interior (passable, inside the building) only if it is
+    NOT on the perimeter and NOT the door. Perimeter = any tile where
+    dx==0, dx==w-1, dz==0, or dz==h-1.
+
+    For narrow/short buildings where every tile is on the perimeter,
+    the fallback guarantees at least 1 interior tile (north of door).
+    """
+    interior: set[tuple[int, int]] = set()
+    for dx in range(w):
+        for dz in range(h):
+            tx, tz = ox + dx, oz + dz
+            if (tx, tz) == (door_x, door_z):
+                continue  # door is passable but not interior
+            # Perimeter tile — wall
+            if dx == 0 or dx == w - 1 or dz == 0 or dz == h - 1:
+                continue
+            interior.add((tx, tz))
+
+    # Guarantee: if no interior tiles (small building), use the
+    # tile directly north of the door.
+    if not interior:
+        fallback = (door_x, door_z - 1)
+        if 0 <= fallback[0] - ox < w and 0 <= fallback[1] - oz < h:
+            interior.add(fallback)
+
+    return interior
+
+
 class TownGenerator:
     """Generates a complete town on a Grid from a WorldConfig."""
 
-    def __init__(self, config: WorldConfig):
+    def __init__(
+        self,
+        config: WorldConfig,
+        features: list | None = None,
+    ):
         self.config = config
         self.rng = random.Random(config.seed)
         self.grid = Grid(config.grid_width, config.grid_height)
         self.buildings: list[PlacedBuilding] = []
         self._road_tiles: set[tuple[int, int]] = set()
+        self._features = features or []
+        self.feature_records: list[dict] = []
 
     def generate(self) -> Grid:
         """Run the full generation pipeline and return the populated grid."""
@@ -100,24 +139,41 @@ class TownGenerator:
         self._place_buildings()
         self._connect_roads()
         self._place_resource_nodes()
+        self._place_terrain_features()
         self._assign_homes()
         self._validate_building_integrity()
         return self.grid
 
     def _validate_building_integrity(self) -> None:
-        """Post-generation check: every non-door building tile must be impassable."""
+        """Post-generation check: enforce wall/interior/door tile flags and arena."""
         for b in self.buildings:
             door = (b.door_x, b.door_z)
+            arena_name = f"{b.building_type}_{b.name.split()[-1]}" if " " in b.name else f"{b.building_type}_1"
+            interior = _building_interior_tiles(
+                b.x, b.z, b.width, b.height, b.door_x, b.door_z,
+            )
             for dx in range(b.width):
                 for dz in range(b.height):
                     tx, tz = b.x + dx, b.z + dz
-                    if (tx, tz) == door:
-                        continue
                     tile = self.grid.get_tile(tx, tz)
-                    if tile and tile.is_passable:
-                        # Road or other post-processing made a building tile walkable.
-                        # Force it back to impassable.
+                    if tile is None:
+                        continue
+                    # Re-enforce arena (resource placement may overwrite)
+                    if not tile.arena:
+                        tile.arena = arena_name
+                    if (tx, tz) == door:
+                        tile.walkable = True
+                        tile.interior = False
+                    elif (tx, tz) in interior:
+                        tile.walkable = True
+                        tile.interior = True
+                    else:
                         tile.walkable = False
+                        tile.interior = False
+                    # Remove any non-building objects placed on building tiles
+                    tile.objects = [
+                        o for o in tile.objects if o.object_type == "building"
+                    ]
 
     # ---------- Terrain ----------
 
@@ -316,12 +372,23 @@ class TownGenerator:
             object_type="building",
             name=instance_name,
             walkable=False,
-            metadata={"width": bdef.width, "height": bdef.height},
+            metadata={
+                "width": bdef.width, "height": bdef.height,
+                "door_local_x": bdef.width // 2,
+            },
         )
 
         # Door is on the south face, centre — ON the building's last row
         door_x = x + bdef.width // 2
         door_z = z + bdef.height - 1
+
+        # Determine which tiles are walkable interior vs impassable wall.
+        # Walls are the perimeter — NPCs can't stand there (visual clipping).
+        # Interior = not on north wall (dz==0), not on south wall except door
+        # row, not on east/west edge for buildings wide enough (width >= 3).
+        interior_tiles = _building_interior_tiles(
+            x, z, bdef.width, bdef.height, door_x, door_z,
+        )
 
         for dx in range(bdef.width):
             for dz in range(bdef.height):
@@ -330,16 +397,18 @@ class TownGenerator:
                 if tile is None:
                     continue
                 tile.terrain = Terrain.STONE if bdef.building_type == "church" else Terrain.DIRT
-                tile.walkable = False
+                is_door = (tx == door_x and tz == door_z)
+                is_interior = (tx, tz) in interior_tiles
+                tile.walkable = is_door or is_interior
+                tile.interior = is_interior
                 self.grid.set_sector(tx, tz, bdef.sector or "residential", arena_name)
-                # Only place the object on the first tile (top-left corner)
+                # Only place the object on the first tile — only if it's a wall tile
                 if dx == 0 and dz == 0:
                     self.grid.place_object(tx, tz, obj)
 
-        # Make the door tile walkable (entrance into building)
+        # Door tile gets road terrain (not interior)
         door_tile = self.grid.get_tile(door_x, door_z)
         if door_tile is not None:
-            door_tile.walkable = True
             door_tile.terrain = Terrain.ROAD
 
         # Ensure the approach tile (one south of door) is also passable
@@ -394,8 +463,9 @@ class TownGenerator:
         tile = self.grid.get_tile(x, z)
         if tile is None:
             return
-        # Never overwrite impassable tiles (building interiors, stone, etc.)
         if not tile.walkable:
+            return
+        if tile.interior:
             return
         if tile.terrain in (Terrain.GRASS, Terrain.DIRT, Terrain.SAND, Terrain.ROAD):
             tile.terrain = Terrain.ROAD
@@ -420,6 +490,8 @@ class TownGenerator:
                 if tile is None:
                     continue
                 if not tile.is_passable:
+                    continue
+                if tile.interior:
                     continue
                 if tile.objects:
                     continue
@@ -454,6 +526,15 @@ class TownGenerator:
             base.append(("trade_post", 2, Terrain.ROAD))
         return base
 
+    # ---------- Terrain Features ----------
+
+    def _place_terrain_features(self) -> None:
+        """Place optional terrain features (bridges, ponds, walls, etc.)."""
+        if not self._features:
+            return
+        from core.world.prompt_gen.features import place_features
+        self.feature_records = place_features(self.grid, self._features, self.rng)
+
     # ---------- Home Assignment ----------
 
     def _assign_homes(self) -> None:
@@ -467,14 +548,21 @@ class TownGenerator:
                 tile.objects[0].metadata["occupant"] = None
 
 
-def generate_world(config: WorldConfig | None = None) -> tuple[Grid, list[PlacedBuilding]]:
+def generate_world(
+    config: WorldConfig | None = None,
+    features: list | None = None,
+) -> tuple[Grid, list[PlacedBuilding]]:
     """
     Convenience function: generate a complete world from config.
+
+    Args:
+        config: WorldConfig parameters. Defaults to standard config.
+        features: Optional list of TerrainFeature objects to place.
 
     Returns (grid, buildings) tuple.
     """
     if config is None:
         config = WorldConfig()
-    gen = TownGenerator(config)
+    gen = TownGenerator(config, features=features)
     grid = gen.generate()
     return grid, gen.buildings

@@ -458,23 +458,40 @@ def test_diagonal_no_corner_clipping(grid, buildings) -> TestResult:
 
 
 def test_building_impermeability(grid, buildings) -> TestResult:
-    """Every non-door building tile must be impassable."""
+    """Building tiles: door passable, interior passable+flagged, walls impassable.
+    Pathfinding must not route through unrelated building interiors."""
+    from core.world.generator import _building_interior_tiles
     violations = []
     for b in buildings:
         door = (b.door_x, b.door_z)
+        interior = _building_interior_tiles(
+            b.x, b.z, b.width, b.height, b.door_x, b.door_z,
+        )
         for dx in range(b.width):
             for dz in range(b.height):
                 tx, tz = b.x + dx, b.z + dz
-                if (tx, tz) == door:
-                    continue
                 tile = grid.get_tile(tx, tz)
-                if tile and tile.is_passable:
-                    violations.append(f"{b.name} ({tx},{tz}) is passable inside building")
+                if tile is None:
+                    continue
+                if (tx, tz) == door:
+                    if tile.interior:
+                        violations.append(f"{b.name} door ({tx},{tz}) marked interior")
+                    if not tile.is_passable:
+                        violations.append(f"{b.name} door ({tx},{tz}) not passable")
+                elif (tx, tz) in interior:
+                    if not tile.interior:
+                        violations.append(f"{b.name} ({tx},{tz}) not marked interior")
+                    if not tile.is_passable:
+                        violations.append(f"{b.name} ({tx},{tz}) not passable")
+                else:
+                    # Wall tile — must be impassable
+                    if tile.is_passable:
+                        violations.append(f"{b.name} wall ({tx},{tz}) is passable")
 
     return TestResult(
         name="building_impermeability",
         passed=len(violations) == 0,
-        details=f"{len(violations)} permeable tiles" if violations else "All building interiors impassable",
+        details=f"{len(violations)} violations" if violations else "All building tiles correctly configured",
         metrics={"violations": len(violations)},
     )
 

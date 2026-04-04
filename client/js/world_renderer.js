@@ -50,10 +50,12 @@ export class WorldRenderer {
         this.terrainGroup = new THREE.Group();
         this.buildingGroup = new THREE.Group();
         this.resourceGroup = new THREE.Group();
+        this.featureGroup = new THREE.Group();
         this.lampGroup = new THREE.Group();
         this.scene.add(this.terrainGroup);
         this.scene.add(this.buildingGroup);
         this.scene.add(this.resourceGroup);
+        this.scene.add(this.featureGroup);
         this.scene.add(this.lampGroup);
 
         /** @type {THREE.PointLight[]} */
@@ -77,6 +79,7 @@ export class WorldRenderer {
         this._buildTerrain(worldData.tiles);
         this._buildStructures(worldData.tiles);
         this._buildResources(worldData.tiles);
+        this._buildFeatures(worldData.tiles);
         this._buildLampPosts(worldData.tiles);
         if (buildings) this._buildDoorMarkers(buildings);
     }
@@ -85,6 +88,7 @@ export class WorldRenderer {
         this._clearGroup(this.terrainGroup);
         this._clearGroup(this.buildingGroup);
         this._clearGroup(this.resourceGroup);
+        this._clearGroup(this.featureGroup);
         this._clearGroup(this.lampGroup);
         this.lampLights = [];
     }
@@ -157,24 +161,86 @@ export class WorldRenderer {
         const h = (obj.metadata && obj.metadata.height) || 2;
         const wallHeight = bType === 'church' ? 3.5 : 2.0;
         const roofHeight = bType === 'church' ? 2.0 : 1.0;
+        const wallThick = 0.15;
+
+        // Door position relative to building origin (0,0 = NW corner)
+        const doorLocalX = (obj.metadata && obj.metadata.door_local_x != null)
+            ? obj.metadata.door_local_x
+            : Math.floor(w / 2);
 
         const group = new THREE.Group();
-
-        // Walls (box)
-        const wallGeo = new THREE.BoxGeometry(w * 0.9, wallHeight, h * 0.9);
         const wallMat = new THREE.MeshStandardMaterial({
             color: wallColour,
             roughness: 0.8,
         });
-        const walls = new THREE.Mesh(wallGeo, wallMat);
-        walls.position.y = wallHeight / 2;
-        walls.castShadow = true;
-        walls.receiveShadow = true;
-        group.add(walls);
 
-        // Roof (pyramid / cone)
+        // --- 4 walls with door gap on south face ---
+
+        // North wall (full width)
+        const northGeo = new THREE.BoxGeometry(w, wallHeight, wallThick);
+        const north = new THREE.Mesh(northGeo, wallMat);
+        north.position.set(0, wallHeight / 2, -(h / 2) + wallThick / 2);
+        north.castShadow = true;
+        north.receiveShadow = true;
+        group.add(north);
+
+        // East wall (full depth)
+        const eastGeo = new THREE.BoxGeometry(wallThick, wallHeight, h);
+        const east = new THREE.Mesh(eastGeo, wallMat);
+        east.position.set(w / 2 - wallThick / 2, wallHeight / 2, 0);
+        east.castShadow = true;
+        east.receiveShadow = true;
+        group.add(east);
+
+        // West wall (full depth)
+        const west = new THREE.Mesh(eastGeo, wallMat);
+        west.position.set(-(w / 2) + wallThick / 2, wallHeight / 2, 0);
+        west.castShadow = true;
+        west.receiveShadow = true;
+        group.add(west);
+
+        // South wall — split into left and right segments around door gap
+        const doorWidth = 0.7;
+        const doorCentreX = doorLocalX - (w / 2) + 0.5;  // local coords relative to group centre
+
+        const southZ = h / 2 - wallThick / 2;
+
+        // Left segment (from west edge to door gap)
+        const leftLen = (doorCentreX + w / 2) - doorWidth / 2;
+        if (leftLen > 0.05) {
+            const leftGeo = new THREE.BoxGeometry(leftLen, wallHeight, wallThick);
+            const leftWall = new THREE.Mesh(leftGeo, wallMat);
+            leftWall.position.set(-(w / 2) + leftLen / 2, wallHeight / 2, southZ);
+            leftWall.castShadow = true;
+            leftWall.receiveShadow = true;
+            group.add(leftWall);
+        }
+
+        // Right segment (from door gap to east edge)
+        const rightStart = (doorCentreX + w / 2) + doorWidth / 2;
+        const rightLen = w - rightStart;
+        if (rightLen > 0.05) {
+            const rightGeo = new THREE.BoxGeometry(rightLen, wallHeight, wallThick);
+            const rightWall = new THREE.Mesh(rightGeo, wallMat);
+            rightWall.position.set(w / 2 - rightLen / 2, wallHeight / 2, southZ);
+            rightWall.castShadow = true;
+            rightWall.receiveShadow = true;
+            group.add(rightWall);
+        }
+
+        // Floor
+        const floorGeo = new THREE.BoxGeometry(w - wallThick * 2, 0.05, h - wallThick * 2);
+        const floorMat = new THREE.MeshStandardMaterial({
+            color: 0x654321,
+            roughness: 0.9,
+        });
+        const floor = new THREE.Mesh(floorGeo, floorMat);
+        floor.position.y = 0.025;
+        floor.receiveShadow = true;
+        group.add(floor);
+
+        // Roof
         if (bType === 'church') {
-            // Steeple
             const steepleGeo = new THREE.ConeGeometry(1.0, roofHeight * 2, 4);
             const steebleMat = new THREE.MeshStandardMaterial({
                 color: roofColour,
@@ -185,7 +251,6 @@ export class WorldRenderer {
             steeple.castShadow = true;
             group.add(steeple);
         } else if (bType === 'market_stall') {
-            // Flat canopy
             const canopyGeo = new THREE.BoxGeometry(w + 0.4, 0.15, h + 0.4);
             const canopyMat = new THREE.MeshStandardMaterial({
                 color: roofColour,
@@ -196,7 +261,6 @@ export class WorldRenderer {
             canopy.castShadow = true;
             group.add(canopy);
         } else {
-            // Pitched roof (use a box rotated to approximate)
             const roofGeo = new THREE.ConeGeometry(
                 Math.max(w, h) * 0.7, roofHeight, 4
             );
@@ -285,6 +349,233 @@ export class WorldRenderer {
             tile.z + 0.5,
         );
         this.resourceGroup.add(group);
+    }
+
+    // ---------- Terrain Features (structures & decorations) ----------
+
+    _buildFeatures(tiles) {
+        const seen = new Set();
+        for (const tile of tiles) {
+            if (!tile.objects) continue;
+            for (const obj of tile.objects) {
+                if (obj.object_type !== 'structure' && obj.object_type !== 'decoration') continue;
+                if (seen.has(obj.object_id)) continue;
+                seen.add(obj.object_id);
+                this._createFeature(obj, tile);
+            }
+        }
+    }
+
+    _createFeature(obj, tile) {
+        const feature = (obj.metadata && obj.metadata.feature) || '';
+        const group = new THREE.Group();
+        const y = (tile.elevation || 0) * 0.3;
+
+        switch (feature) {
+            case 'bridge':
+                this._buildBridge(group);
+                break;
+            case 'well':
+                this._buildWell(group);
+                break;
+            case 'campfire':
+                this._buildCampfire(group);
+                break;
+            case 'garden':
+                this._buildGardenPlant(group, obj.name);
+                break;
+            case 'watchtower':
+                // Watchtowers use object_type 'building', rendered by _buildStructures
+                return;
+            default:
+                // Generic marker for unknown features
+                this._buildFeatureMarker(group, feature);
+                break;
+        }
+
+        group.position.set(tile.x + 0.5, y, tile.z + 0.5);
+        this.featureGroup.add(group);
+    }
+
+    _buildBridge(group) {
+        // Wooden bridge planks
+        const plankMat = new THREE.MeshStandardMaterial({
+            color: 0x8b6914,
+            roughness: 0.85,
+        });
+
+        // Main deck
+        const deckGeo = new THREE.BoxGeometry(1.0, 0.08, 1.0);
+        const deck = new THREE.Mesh(deckGeo, plankMat);
+        deck.position.y = 0.15;
+        deck.receiveShadow = true;
+        group.add(deck);
+
+        // Railings
+        const railMat = new THREE.MeshStandardMaterial({
+            color: 0x6b4f12,
+            roughness: 0.8,
+        });
+        for (const side of [-0.45, 0.45]) {
+            // Vertical posts
+            for (const along of [-0.35, 0.35]) {
+                const postGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.5, 4);
+                const post = new THREE.Mesh(postGeo, railMat);
+                post.position.set(side, 0.44, along);
+                post.castShadow = true;
+                group.add(post);
+            }
+            // Horizontal rail
+            const railGeo = new THREE.BoxGeometry(0.03, 0.03, 0.8);
+            const rail = new THREE.Mesh(railGeo, railMat);
+            rail.position.set(side, 0.65, 0);
+            group.add(rail);
+        }
+    }
+
+    _buildWell(group) {
+        const stoneMat = new THREE.MeshStandardMaterial({
+            color: 0x808080,
+            roughness: 0.9,
+        });
+
+        // Circular stone wall
+        const wallGeo = new THREE.CylinderGeometry(0.3, 0.35, 0.5, 8, 1, true);
+        const wall = new THREE.Mesh(wallGeo, stoneMat);
+        wall.position.y = 0.25;
+        wall.castShadow = true;
+        group.add(wall);
+
+        // Rim
+        const rimGeo = new THREE.TorusGeometry(0.32, 0.04, 6, 8);
+        const rim = new THREE.Mesh(rimGeo, stoneMat);
+        rim.position.y = 0.5;
+        rim.rotation.x = -Math.PI / 2;
+        group.add(rim);
+
+        // Wooden support posts
+        const woodMat = new THREE.MeshStandardMaterial({ color: 0x5c3a1e });
+        for (const side of [-0.25, 0.25]) {
+            const postGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.8, 4);
+            const post = new THREE.Mesh(postGeo, woodMat);
+            post.position.set(side, 0.9, 0);
+            post.castShadow = true;
+            group.add(post);
+        }
+
+        // Crossbar
+        const barGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.6, 4);
+        const bar = new THREE.Mesh(barGeo, woodMat);
+        bar.position.y = 1.3;
+        bar.rotation.z = Math.PI / 2;
+        group.add(bar);
+
+        // Bucket (tiny cylinder hanging from crossbar)
+        const bucketGeo = new THREE.CylinderGeometry(0.06, 0.05, 0.1, 6);
+        const bucketMat = new THREE.MeshStandardMaterial({ color: 0x4a4a4a });
+        const bucket = new THREE.Mesh(bucketGeo, bucketMat);
+        bucket.position.y = 1.0;
+        group.add(bucket);
+    }
+
+    _buildCampfire(group) {
+        // Stone ring
+        const stoneMat = new THREE.MeshStandardMaterial({
+            color: 0x666666,
+            roughness: 0.95,
+        });
+        for (let i = 0; i < 8; i++) {
+            const angle = (i / 8) * Math.PI * 2;
+            const stoneGeo = new THREE.SphereGeometry(0.06, 4, 4);
+            const stone = new THREE.Mesh(stoneGeo, stoneMat);
+            stone.position.set(
+                Math.cos(angle) * 0.22,
+                0.05,
+                Math.sin(angle) * 0.22,
+            );
+            group.add(stone);
+        }
+
+        // Logs
+        const logMat = new THREE.MeshStandardMaterial({ color: 0x3a2010 });
+        for (let i = 0; i < 3; i++) {
+            const logGeo = new THREE.CylinderGeometry(0.03, 0.035, 0.3, 5);
+            const log = new THREE.Mesh(logGeo, logMat);
+            const angle = (i / 3) * Math.PI * 2;
+            log.position.set(Math.cos(angle) * 0.08, 0.08, Math.sin(angle) * 0.08);
+            log.rotation.z = Math.PI / 2 + angle;
+            group.add(log);
+        }
+
+        // Ember glow (emissive sphere)
+        const emberGeo = new THREE.SphereGeometry(0.08, 6, 6);
+        const emberMat = new THREE.MeshStandardMaterial({
+            color: 0xff4400,
+            emissive: 0xff4400,
+            emissiveIntensity: 0.6,
+            roughness: 1.0,
+        });
+        const ember = new THREE.Mesh(emberGeo, emberMat);
+        ember.position.y = 0.12;
+        group.add(ember);
+
+        // Warm point light
+        const light = new THREE.PointLight(0xff6622, 0.5, 5, 2);
+        light.position.y = 0.3;
+        group.add(light);
+    }
+
+    _buildGardenPlant(group, name) {
+        const n = (name || '').toLowerCase();
+        let colour = 0x88cc44;
+        let height = 0.25;
+
+        if (n.includes('rose')) {
+            colour = 0xcc3344;
+            height = 0.35;
+        } else if (n.includes('lavender')) {
+            colour = 0x9966cc;
+            height = 0.3;
+        } else if (n.includes('herb')) {
+            colour = 0x55aa33;
+            height = 0.2;
+        } else if (n.includes('wildflower')) {
+            colour = 0xddaa33;
+            height = 0.3;
+        }
+
+        // Low bush
+        const bushGeo = new THREE.SphereGeometry(0.15, 5, 4);
+        const bushMat = new THREE.MeshStandardMaterial({
+            color: 0x44882a,
+            roughness: 0.9,
+        });
+        const bush = new THREE.Mesh(bushGeo, bushMat);
+        bush.position.y = 0.12;
+        group.add(bush);
+
+        // Flower/herb on top
+        const flowerGeo = new THREE.SphereGeometry(0.08, 5, 4);
+        const flowerMat = new THREE.MeshStandardMaterial({
+            color: colour,
+            roughness: 0.7,
+        });
+        const flower = new THREE.Mesh(flowerGeo, flowerMat);
+        flower.position.y = height;
+        group.add(flower);
+    }
+
+    _buildFeatureMarker(group, feature) {
+        // Subtle stone marker for unrecognised features
+        const geo = new THREE.DodecahedronGeometry(0.2, 0);
+        const mat = new THREE.MeshStandardMaterial({
+            color: 0x999999,
+            roughness: 0.9,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.position.y = 0.2;
+        mesh.castShadow = true;
+        group.add(mesh);
     }
 
     // ---------- Victorian Lamp Posts ----------
@@ -397,57 +688,23 @@ export class WorldRenderer {
     // ---------- Door Markers ----------
 
     _buildDoorMarkers(buildings) {
-        const doorGeo = new THREE.BoxGeometry(0.5, 1.2, 0.1);
-        const doorMat = new THREE.MeshStandardMaterial({
-            color: 0x3a2010,
-            roughness: 0.7,
-        });
-
+        // Door openings are created by the gap in the south wall
+        // (see _createBuilding). We just add a small step/threshold
+        // outside the door for visual cue.
         for (const b of buildings) {
             if (b.door_x == null || b.door_z == null) continue;
 
-            // Door tile is on the building's south wall (last row of footprint).
-            // Position the door mesh flush with the building's south face.
             const doorX = b.door_x + 0.5;
-            // Building south wall face: mesh centre z + half wall depth
-            const southFaceZ = b.z + b.height / 2 + (b.height * 0.9) / 2;
-            const doorZ = southFaceZ;
+            const southEdgeZ = b.z + b.height;
 
-            // Direction from building centre to door (outward)
-            const cx = b.x + b.width / 2;
-            const cz = b.z + b.height / 2;
-            const faceDx = doorX - cx;
-            const faceDz = doorZ - cz;
-
-            const door = new THREE.Mesh(doorGeo, doorMat);
-            door.position.set(doorX, 0.6, doorZ);
-
-            // Face the door outward (away from building centre)
-            door.lookAt(
-                doorX + faceDx,
-                0.6,
-                doorZ + faceDz,
-            );
-
-            door.castShadow = true;
-            this.buildingGroup.add(door);
-
-            // Small step/threshold in front of the door
-            const stepGeo = new THREE.BoxGeometry(0.6, 0.08, 0.3);
+            const stepGeo = new THREE.BoxGeometry(0.7, 0.06, 0.2);
             const stepMat = new THREE.MeshStandardMaterial({
                 color: 0x888888,
                 roughness: 0.9,
             });
             const step = new THREE.Mesh(stepGeo, stepMat);
-            // Step is slightly in front of door (toward the outside)
-            const stepOffset = 0.2;
-            const faceLen = Math.sqrt(faceDx * faceDx + faceDz * faceDz) || 1;
-            step.position.set(
-                doorX + (faceDx / faceLen) * stepOffset,
-                0.04,
-                doorZ + (faceDz / faceLen) * stepOffset,
-            );
-            step.rotation.y = door.rotation.y;
+            step.position.set(doorX, 0.03, southEdgeZ);
+            step.receiveShadow = true;
             this.buildingGroup.add(step);
         }
     }

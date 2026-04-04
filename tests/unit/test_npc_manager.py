@@ -95,35 +95,42 @@ class TestMovementVariation:
             assert 1.6 <= npc.move_speed <= 2.4
 
     @pytest.mark.asyncio
-    async def test_slot_transition_queues_pending_departures(self, manager):
-        """Slot transition should queue departures, not navigate immediately."""
-        npcs = manager.spawn_population(3)
-        # Give NPCs schedules so they have somewhere to go
-        from core.npc.models import ScheduleEntry
-        for npc in npcs:
-            npc.daily_schedule = [
-                ScheduleEntry("morning", "work", "work", 5),
-            ]
-        await manager._handle_slot_transition("morning")
-        # At least some NPCs should have pending departures (delay > 0)
-        assert len(manager._pending_departures) >= 1
-
-    @pytest.mark.asyncio
-    async def test_pending_departures_dispatch_after_delay(self, manager):
-        """Departures should fire once their delay expires."""
+    async def test_action_advance_dispatches_immediately(self, manager):
+        """Advancing to next action should dispatch NPCs immediately (Stanford model)."""
         npcs = manager.spawn_population(3)
         from core.npc.models import ScheduleEntry, ActivityState
         for npc in npcs:
             npc.daily_schedule = [
-                ScheduleEntry("morning", "work", "work", 5),
+                ScheduleEntry("morning", "eat breakfast", "home", 3, duration_minutes=60),
+                ScheduleEntry("morning", "work", "work", 5, duration_minutes=240),
             ]
-        await manager._handle_slot_transition("morning")
-        initial_pending = len(manager._pending_departures)
-        assert initial_pending > 0
+            npc.schedule_index = 0
+            npc.action_start_minutes = 0.0
+        # Advance each NPC to the second entry
+        for npc in npcs:
+            await manager._advance_npc_action(npc, 60.0, "morning")
+        # NPCs should be walking or at destination — no stagger queue
+        for npc in npcs:
+            assert npc.schedule_index == 1
+            assert npc.action_start_minutes == 60.0
 
-        # Process with enough time to clear all delays (max 40 real seconds)
-        manager._process_pending_departures(45.0)
-        assert len(manager._pending_departures) == 0
+    @pytest.mark.asyncio
+    async def test_action_advance_updates_schedule_index(self, manager):
+        """Each advance should increment schedule_index and reset timer."""
+        npcs = manager.spawn_population(1)
+        from core.npc.models import ScheduleEntry
+        npc = npcs[0]
+        npc.daily_schedule = [
+            ScheduleEntry("morning", "eat breakfast", "home", 3, duration_minutes=60),
+            ScheduleEntry("morning", "work", "work", 5, duration_minutes=240),
+            ScheduleEntry("afternoon", "eat lunch", "tavern", 4, duration_minutes=60),
+        ]
+        npc.schedule_index = 0
+        npc.action_start_minutes = 0.0
+        await manager._advance_npc_action(npc, 60.0, "morning")
+        assert npc.schedule_index == 1
+        await manager._advance_npc_action(npc, 300.0, "afternoon")
+        assert npc.schedule_index == 2
 
 
 class TestSeedMemories:
@@ -191,17 +198,13 @@ class TestEmergencyOverrides:
         walking = [n for n in npcs if n.activity == ActivityState.WALKING]
         assert len(walking) >= 1
 
-    @pytest.mark.asyncio
-    async def test_force_navigate_all_clears_pending(self, manager):
-        """Emergency movement should clear any staggered departures."""
-        from core.npc.models import ScheduleEntry
+    def test_force_navigate_all_clears_pending(self, manager):
+        """Emergency movement should clear any pending departures."""
         npcs = manager.spawn_population(3)
+        # Add pending departures using real NPC IDs
         for npc in npcs:
-            npc.daily_schedule = [
-                ScheduleEntry("morning", "work", "work", 5),
-            ]
-        await manager._handle_slot_transition("morning")
-        assert len(manager._pending_departures) >= 1
+            manager._pending_departures[npc.npc_id] = (0.0, lambda: None)
+        assert len(manager._pending_departures) == len(npcs)
 
         manager.force_navigate_all(0, 0, "emergency!")
         assert len(manager._pending_departures) == 0

@@ -250,7 +250,7 @@ class TestResolveLocation:
         entry = ScheduleEntry("evening", "eat", "tavern", 4)
         x, z = resolve_schedule_location(entry, npc, [building])
         assert x == 5
-        assert z == 9
+        assert z == 9  # door tile — NPC appears inside the building
 
     def test_falls_back_to_town_square(self):
         npc = _make_npc()

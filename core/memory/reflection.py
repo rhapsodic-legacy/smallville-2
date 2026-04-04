@@ -10,6 +10,7 @@ results back as high-importance episodic memories.
 from __future__ import annotations
 
 import logging
+import random
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,6 +19,24 @@ if TYPE_CHECKING:
     from core.npc.models import NPC
 
 logger = logging.getLogger(__name__)
+
+# Template-based reflections for when LLM is unavailable
+_CONVERSATION_REFLECTION_TEMPLATES = [
+    "I enjoyed talking with {other_name}. We should speak again soon.",
+    "That conversation with {other_name} gave me something to think about.",
+    "{other_name} seems like someone I can trust. Or perhaps I need to be more careful.",
+    "I wonder what {other_name} really thinks about life in Smallville.",
+    "Talking with {other_name} reminded me why I became a {occupation}.",
+    "I should remember what {other_name} said — it might matter later.",
+]
+
+_GENERAL_REFLECTION_TEMPLATES = [
+    "I've been busy lately. I should take stock of how things are going.",
+    "Life as a {occupation} in Smallville has its rhythms. I'm settling into mine.",
+    "I've noticed some changes around town. Things feel different lately.",
+    "I should think about what I really want for my future here.",
+    "The people of Smallville are interesting. I'm learning who to trust.",
+]
 
 # Prompt templates for reflection
 FOCAL_POINT_PROMPT = (
@@ -96,6 +115,19 @@ async def run_reflection(
             )
             insights.append(insight)
 
+    # If LLM produced no insights, generate a template fallback
+    # so reflection still advances the importance accumulator
+    if not insights:
+        fallback = random.choice(_GENERAL_REFLECTION_TEMPLATES).format(
+            occupation=npc.occupation,
+        )
+        await memory.record_reflection(
+            npc_id=npc.npc_id,
+            insight=fallback,
+            game_time=current_game_time,
+        )
+        insights.append(fallback)
+
     logger.info(
         "%s reflected and generated %d insights", npc.name, len(insights),
     )
@@ -155,7 +187,16 @@ async def reflect_on_conversation(
 
     except Exception as e:
         logger.warning("Post-conversation reflection failed for %s: %s", npc.name, e)
-        return None
+        # Template fallback so NPCs always reflect after conversations
+        insight = random.choice(_CONVERSATION_REFLECTION_TEMPLATES).format(
+            other_name=other_name, occupation=npc.occupation,
+        )
+        await memory.record_reflection(
+            npc_id=npc.npc_id,
+            insight=insight,
+            game_time=current_game_time,
+        )
+        return insight
 
 
 async def _generate_focal_questions(

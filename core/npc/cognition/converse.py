@@ -113,8 +113,10 @@ def should_initiate_conversation(
     if current_game_minutes - other.last_conversation_time < other.conversation_cooldown:
         return False
 
-    # Don't interrupt sleeping or important work
-    busy_states = {ActivityState.SLEEPING}
+    # Don't interrupt sleeping or walking NPCs.
+    # Walking interruption was the #1 cause of oscillation — NPCs get
+    # teleported mid-walk, dispatched back, meet again, repeat forever.
+    busy_states = {ActivityState.SLEEPING, ActivityState.WALKING}
     if npc.activity in busy_states or other.activity in busy_states:
         return False
 
@@ -131,7 +133,7 @@ def should_initiate_conversation(
         # ±0.2 max adjustment
         chance += max(-0.2, min(0.2, disposition / 100))
 
-    return random.random() < chance
+    return npc._rng.random() < chance
 
 
 async def initiate_conversation(
@@ -300,7 +302,7 @@ async def continue_conversation(
 
     # Random chance to end after each exchange (increases with count)
     end_chance = len(conv.exchanges) / (MAX_EXCHANGES + 2)
-    if random.random() < end_chance:
+    if npc._rng.random() < end_chance:
         await end_conversation(npc, other)
         return False
 
@@ -324,6 +326,9 @@ async def end_conversation(
     other.activity = ActivityState.IDLE
     npc.current_action_description = ""
     other.current_action_description = ""
+    # Flag for post-conversation dispatch (manager picks up schedule)
+    npc._needs_post_convo_dispatch = True
+    other._needs_post_convo_dispatch = True
 
     if current_game_minutes > 0:
         npc.last_conversation_time = current_game_minutes
@@ -345,7 +350,7 @@ def _fallback_greeting(npc: NPC) -> str:
         f"Ah, good to see a friendly face. {npc.name}, at your service.",
         "Well met! What brings you this way?",
     ]
-    return random.choice(greetings)
+    return npc._rng.choice(greetings)
 
 
 def _fallback_response(npc: NPC) -> str:
@@ -358,4 +363,4 @@ def _fallback_response(npc: NPC) -> str:
         "Well, I must be getting on with things soon.",
         "That's good to hear. Things are well enough on my end too.",
     ]
-    return random.choice(responses)
+    return npc._rng.choice(responses)

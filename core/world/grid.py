@@ -44,6 +44,7 @@ class Tile:
     sector: str = ""   # hierarchical zone name
     arena: str = ""    # sub-zone (e.g. "blacksmith_shop")
     elevation: float = 0.0
+    interior: bool = False  # building interior — passable but not routable
 
     @property
     def address(self) -> str:
@@ -198,6 +199,7 @@ class Grid:
                         "object_id": obj.object_id,
                         "object_type": obj.object_type,
                         "name": obj.name,
+                        "metadata": obj.metadata,
                     }
                     for obj in tile.objects
                 ],

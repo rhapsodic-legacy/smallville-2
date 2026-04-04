@@ -67,6 +67,13 @@ def find_path(
     if goal_tile is None:
         return None
 
+    # If goal is inside a building, allow routing through that building's
+    # interior tiles. NPCs must not shortcut through other buildings.
+    # Also allow routing through the start building so NPCs can leave.
+    goal_arena = goal_tile.arena if goal_tile.interior else ""
+    start_tile = grid.get_tile(start_x, start_z)
+    start_arena = start_tile.arena if (start_tile and start_tile.interior) else ""
+
     # Open set: (f_score, counter, (x, z))
     counter = 0
     open_set: list[tuple[float, int, tuple[int, int]]] = []
@@ -96,14 +103,22 @@ def find_path(
             tile = grid.get_tile(nx, nz)
             if tile is None or not tile.is_passable:
                 continue
+            # Interior tiles block routing — no shortcuts through buildings.
+            # Exception: tiles in the same building as the goal or start.
+            if tile.interior and not (
+                (goal_arena and tile.arena == goal_arena)
+                or (start_arena and tile.arena == start_arena)
+            ):
+                continue
 
             # Diagonal corner-cutting prevention: both adjacent cardinal
-            # tiles must be passable so NPCs never clip building corners.
+            # tiles must be passable AND non-wall so NPCs never clip
+            # building corners or door-adjacent walls.
             if dx != 0 and dz != 0:
                 t_horiz = grid.get_tile(cx + dx, cz)
                 t_vert = grid.get_tile(cx, cz + dz)
-                if not (t_horiz and t_horiz.is_passable
-                        and t_vert and t_vert.is_passable):
+                if (not t_horiz or not t_horiz.is_passable
+                        or not t_vert or not t_vert.is_passable):
                     continue
 
             cost = _movement_cost(dx, dz)

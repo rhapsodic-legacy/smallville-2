@@ -85,7 +85,52 @@ def find_rest_tile(
     if tile and tile.is_passable and (target_x, target_z) not in occupied:
         return (target_x, target_z)
 
-    # Spiral outward ring by ring
+    # If target is inside a building, prefer tiles in the same building
+    # before spiralling outward to the exterior.
+    target_arena = tile.arena if tile and tile.interior else ""
+    if target_arena:
+        for radius in range(1, MAX_SEARCH_RADIUS + 1):
+            best = _best_in_ring(
+                target_x, target_z, radius, grid, occupied,
+                require_arena=target_arena,
+            )
+            if best:
+                return best
+
+        # No free interior tiles — exit through the door tile.
+        # Find the door: the arena-tagged tile on the building perimeter
+        # that is passable but NOT interior.
+        for radius in range(1, MAX_SEARCH_RADIUS + 1):
+            for dx in range(-radius, radius + 1):
+                for dz in range(-radius, radius + 1):
+                    if abs(dx) != radius and abs(dz) != radius:
+                        continue
+                    tx, tz = target_x + dx, target_z + dz
+                    t = grid.get_tile(tx, tz)
+                    if (t and t.is_passable and not t.interior
+                            and t.arena == target_arena
+                            and (tx, tz) not in occupied):
+                        return (tx, tz)
+
+        # Door occupied too — find tile just outside the door
+        for radius in range(1, MAX_SEARCH_RADIUS + 1):
+            for dx in range(-radius, radius + 1):
+                for dz in range(-radius, radius + 1):
+                    if abs(dx) != radius and abs(dz) != radius:
+                        continue
+                    tx, tz = target_x + dx, target_z + dz
+                    t = grid.get_tile(tx, tz)
+                    if (t and t.is_passable and not t.interior
+                            and t.arena == target_arena):
+                        # Find free tile adjacent to the door (outside)
+                        for ddx, ddz in [(0, 1), (1, 0), (-1, 0), (0, -1)]:
+                            ox, oz = tx + ddx, tz + ddz
+                            ot = grid.get_tile(ox, oz)
+                            if (ot and ot.is_passable and not ot.interior
+                                    and (ox, oz) not in occupied):
+                                return (ox, oz)
+
+    # Spiral outward ring by ring (no arena restriction)
     for radius in range(1, MAX_SEARCH_RADIUS + 1):
         best = _best_in_ring(target_x, target_z, radius, grid, occupied)
         if best:
@@ -163,42 +208,65 @@ def resolve_overlaps(
     """
     Safety net: scan all resting NPCs and nudge any that share a tile.
 
-    Called once per tick. Returns count of NPCs that were moved.
+    Iterates up to 3 passes so that nudging NPC A onto NPC B's tile
+    is caught and resolved in the same call. Nudged NPCs get trail
+    data so the client animates the separation. Returns total NPCs moved.
     """
-    # Build map of tile → list of resting NPCs on that tile
-    tile_npcs: dict[tuple[int, int], list[NPC]] = {}
-    for npc in npcs:
-        if _is_walking(npc):
-            continue
-        pos = (npc.tile_x, npc.tile_z)
-        tile_npcs.setdefault(pos, []).append(npc)
+    total_moved = 0
 
-    moved = 0
-    for pos, stacked in tile_npcs.items():
-        if len(stacked) <= 1:
-            continue
-
-        # First NPC stays, others get nudged
+    for _pass in range(3):
+        # Rebuild occupied set fresh each pass to see current positions
         occupied = get_occupied_tiles(npcs)
-        for extra_npc in stacked[1:]:
-            # Exclude this NPC's current position so it can be moved
-            search_occupied = occupied - {(extra_npc.tile_x, extra_npc.tile_z)}
-            # But keep the position of the NPC that's staying
-            search_occupied.add(pos)
-            new_pos = find_rest_tile(
-                pos[0], pos[1], grid, search_occupied,
-            )
-            if new_pos != pos:
-                extra_npc.x = float(new_pos[0])
-                extra_npc.z = float(new_pos[1])
-                occupied.add(new_pos)
-                moved += 1
-                logger.debug(
-                    "Nudged %s from (%d,%d) to (%d,%d) to resolve overlap",
-                    extra_npc.name, pos[0], pos[1], new_pos[0], new_pos[1],
-                )
 
-    return moved
+        # Build map of tile → list of resting NPCs on that tile
+        tile_npcs: dict[tuple[int, int], list[NPC]] = {}
+        for npc in npcs:
+            if _is_walking(npc):
+                continue
+            pos = (npc.tile_x, npc.tile_z)
+            tile_npcs.setdefault(pos, []).append(npc)
+
+        moved_this_pass = 0
+        for pos, stacked in tile_npcs.items():
+            if len(stacked) <= 1:
+                continue
+
+            # First NPC stays, others get nudged
+            for extra_npc in stacked[1:]:
+                # Exclude this NPC's current position so it can be moved
+                search_occupied = occupied - {(extra_npc.tile_x, extra_npc.tile_z)}
+                # But keep the position of the NPC that's staying
+                search_occupied.add(pos)
+
+                # Outdoor NPCs search wider (user-requested behaviour)
+                tile = grid.get_tile(pos[0], pos[1])
+                is_indoor = tile and tile.interior
+
+                new_pos = find_rest_tile(
+                    pos[0], pos[1], grid, search_occupied,
+                )
+                if new_pos != pos:
+                    # Set trail so client animates the nudge
+                    if not hasattr(extra_npc, '_tick_trail'):
+                        extra_npc._tick_trail = []
+                    extra_npc._tick_trail.append(
+                        (new_pos[0], new_pos[1])
+                    )
+                    extra_npc.x = float(new_pos[0])
+                    extra_npc.z = float(new_pos[1])
+                    occupied.add(new_pos)
+                    moved_this_pass += 1
+                    logger.debug(
+                        "Nudged %s from (%d,%d) to (%d,%d) (pass %d)",
+                        extra_npc.name, pos[0], pos[1],
+                        new_pos[0], new_pos[1], _pass + 1,
+                    )
+
+        total_moved += moved_this_pass
+        if moved_this_pass == 0:
+            break  # Stable — no overlaps remain
+
+    return total_moved
 
 
 # ---------- Internal helpers ----------
@@ -208,11 +276,15 @@ def _best_in_ring(
     cx: int, cz: int, radius: int,
     grid: Grid,
     occupied: set[tuple[int, int]],
+    require_arena: str = "",
 ) -> tuple[int, int] | None:
     """
     Find the best free passable tile on the ring at `radius`
     from (cx, cz). Prefers tiles closest to the centre of the ring
     (i.e. directly N/S/E/W before diagonals).
+
+    If require_arena is set, only considers tiles in that arena
+    (keeps NPCs inside the same building).
     """
     candidates: list[tuple[int, int, int]] = []  # (x, z, manhattan_from_target)
 
@@ -224,6 +296,8 @@ def _best_in_ring(
             tx, tz = cx + dx, cz + dz
             tile = grid.get_tile(tx, tz)
             if tile and tile.is_passable and (tx, tz) not in occupied:
+                if require_arena and tile.arena != require_arena:
+                    continue
                 dist = abs(dx) + abs(dz)
                 candidates.append((tx, tz, dist))
 

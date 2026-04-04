@@ -151,13 +151,18 @@ class TestNPCSchedule:
         npc.schedule_day = 1
         return npc
 
-    def test_needs_new_schedule_different_day(self):
+    def test_needs_new_schedule_when_exhausted(self):
+        """Duration model: needs schedule when daily_schedule is empty."""
         npc = self._make_npc()
+        npc.daily_schedule = []
         assert npc.needs_new_schedule(2)
 
-    def test_no_new_schedule_same_day(self):
+    def test_no_new_schedule_when_has_entries(self):
+        """Duration model: don't regenerate while entries remain."""
         npc = self._make_npc()
         assert not npc.needs_new_schedule(1)
+        # Even on a different day, if schedule has entries, don't regenerate
+        assert not npc.needs_new_schedule(2)
 
     def test_needs_schedule_when_empty(self):
         npc = self._make_npc()

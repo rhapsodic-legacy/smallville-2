@@ -71,13 +71,19 @@ class PersonalityTraits:
 
 @dataclass
 class ScheduleEntry:
-    """A single block in an NPC's daily schedule."""
+    """A single block in an NPC's daily schedule.
+
+    Stanford style: each entry has a duration in game-minutes. The NPC
+    cycles through entries by duration, not by clock slot boundaries.
+    The 'slot' field is kept for backward compat and logging.
+    """
     slot: str          # ScheduleSlot value: early_morning, morning, etc.
     activity: str      # e.g. "work at forge", "eat at tavern", "sleep"
     location: str      # Hierarchical address or building name
     priority: int = 5  # 1 (low) to 10 (high), for interruption decisions
     target_x: int | None = None  # Pre-resolved coordinates (from planner)
     target_z: int | None = None
+    duration_minutes: float = 0.0  # How long this action lasts (game minutes)
 
 
 @dataclass
@@ -119,6 +125,8 @@ class NPC:
     home_z: int = 0
     work_x: int = 0
     work_z: int = 0
+    # Stanford living_area: hierarchical address like "smallville:residential:home_3"
+    living_area: str = ""
     health: float = 1.0
     energy: float = 1.0
     hunger: float = 0.0  # 0 = full, 1 = starving
@@ -134,9 +142,11 @@ class NPC:
     long_term_goals: list[str] = field(default_factory=list)
     short_term_goals: list[str] = field(default_factory=list)
 
-    # --- Schedule ---
+    # --- Schedule (Stanford style: duration-based action list) ---
     daily_schedule: list[ScheduleEntry] = field(default_factory=list)
     schedule_day: int = 0  # which game day this schedule was generated for
+    schedule_index: int = 0  # current position in daily_schedule
+    action_start_minutes: float = 0.0  # game-minutes when current action started
 
     # --- Resources ---
     gold: int = 0
@@ -206,7 +216,13 @@ class NPC:
         return abs(self.x - x) + abs(self.z - z)
 
     def needs_new_schedule(self, current_day: int) -> bool:
-        return self.schedule_day != current_day or not self.daily_schedule
+        """Check if this NPC needs a new schedule.
+
+        Duration-based model: only regenerate when the schedule list is
+        empty (exhausted). Day-based regeneration is handled by
+        _advance_npc_action when the last entry expires.
+        """
+        return not self.daily_schedule
 
     def get_current_schedule_entry(self, slot: str) -> ScheduleEntry | None:
         """Get the schedule entry for the given time slot."""

@@ -26,8 +26,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Importance threshold that triggers a reflection
-REFLECTION_IMPORTANCE_THRESHOLD = 150.0
+# Importance threshold that triggers a reflection.
+# Stanford used ~100. With observations at 0.5 importance each,
+# this triggers after ~160 observations (~80 perception cycles).
+REFLECTION_IMPORTANCE_THRESHOLD = 80.0
 
 # How many memories to include in context for different tiers
 TIER_CONTEXT_LIMITS = {
@@ -229,6 +231,57 @@ class MemoryManager:
             game_time=game_time,
         )
         self._last_reflection_time[npc_id] = game_time
+        return memory_id
+
+    # ---------- Intent recording ----------
+
+    async def record_intent(
+        self,
+        npc_id: str,
+        description: str,
+        destination: tuple[int, int] | None = None,
+        schedule_slot: str = "",
+        subtasks: list[str] | None = None,
+        game_time: float = 0.0,
+        location_x: int = 0,
+        location_z: int = 0,
+    ) -> str:
+        """
+        Record what an NPC is TRYING to do — their intent.
+
+        Unlike observations (reactive — what they saw/heard), intents
+        capture the NPC's goal: where they're heading, why, and what
+        subtasks they plan to execute. This makes it possible to
+        diagnose movement bugs from logs alone.
+        """
+        parts = [description]
+        if destination:
+            parts.append(f"destination=({destination[0]}, {destination[1]})")
+        if schedule_slot:
+            parts.append(f"slot={schedule_slot}")
+        if subtasks:
+            parts.append(f"plan: {'; '.join(subtasks[:4])}")
+
+        intent_text = f"Intent: {' | '.join(parts)}"
+
+        memory_id = self.episodic.add_memory(
+            npc_id=npc_id,
+            description=intent_text,
+            category="intent",
+            importance=0.3,  # Low — diagnostic, not narratively important
+            game_time=game_time,
+            location_x=location_x,
+            location_z=location_z,
+        )
+
+        logger.info(
+            "NPC %s intent: %s → (%s, %s) [%s]",
+            npc_id, description,
+            destination[0] if destination else "?",
+            destination[1] if destination else "?",
+            schedule_slot,
+        )
+
         return memory_id
 
     # ---------- Retrieval ----------

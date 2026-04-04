@@ -20,6 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from core.world.generator import WorldConfig, generate_world
+from core.world.prompt_gen import TownPromptGenerator
+from core.world.prompt_gen.features import TerrainFeature
 from core.time_system.clock import GameClock
 from core.npc.manager import NPCManager
 from core.npc.llm_client import ClaudeProvider, MockProvider
@@ -39,9 +41,21 @@ app.mount("/static", StaticFiles(directory=str(CLIENT_DIR)), name="static")
 # ---------- Game State ----------
 
 game_clock = GameClock()
-world_config = WorldConfig(population=10, terrain="riverside", seed=42)
-grid, buildings = generate_world(world_config)
+
+# Town prompt system — generates world from natural language description
+import asyncio as _asyncio
+
+TOWN_DESCRIPTION = "A cozy riverside town with forest and two bridges"
+
+_prompt_gen = TownPromptGenerator(seed=42)
+_spec = _asyncio.get_event_loop().run_until_complete(
+    _prompt_gen.generate_config(TOWN_DESCRIPTION)
+)
+world_config = _spec.config
+town_name = _spec.town_name
+grid, buildings = generate_world(world_config, features=_spec.features)
 world_data = grid.to_dict()  # cached serialisation — rebuilt on world change
+logger.info("Generated town '%s' from prompt: %s", town_name, TOWN_DESCRIPTION)
 
 # LLM provider selection: Claude > Mistral > Mock
 if os.environ.get("ANTHROPIC_API_KEY"):
@@ -56,12 +70,18 @@ else:
 
 memory_manager = MemoryManager(llm=llm_provider)
 
+# Set DETERMINISTIC=1 env var to use template schedules only (no LLM)
+_deterministic_mode = os.environ.get("DETERMINISTIC", "").strip() in ("1", "true", "yes")
+if _deterministic_mode:
+    logger.info("Deterministic mode enabled — using template schedules only")
+
 npc_manager = NPCManager(
     grid=grid,
     buildings=buildings,
     llm=llm_provider,
     seed=42,
     memory=memory_manager,
+    deterministic=_deterministic_mode,
 )
 npc_manager.spawn_population(world_config.population)
 
@@ -97,24 +117,26 @@ manager = ConnectionManager()
 
 # ---------- Game Loop ----------
 
-TICK_INTERVAL = 1.0  # real seconds between ticks
+TICK_INTERVAL = 0.25  # real seconds between movement ticks (4 ticks/sec)
 
 
-async def game_loop():
-    """Background task that advances the game clock, NPC simulation, and broadcasts updates."""
+async def movement_loop():
+    """Fast loop — movement, departures, overlaps at steady 4Hz.
+
+    Never blocks on LLM calls. This is what clients see.
+    """
     last_time = time.monotonic()
     while True:
         await asyncio.sleep(TICK_INTERVAL)
         now = time.monotonic()
-        delta = now - last_time
+        wall_delta = now - last_time
         last_time = now
 
-        events = game_clock.tick(delta)
+        events = game_clock.tick(wall_delta)
+        move_delta = min(wall_delta, TICK_INTERVAL)
 
-        # Run NPC simulation tick
-        npc_state = await npc_manager.tick(game_clock, delta)
+        npc_state = npc_manager.movement_tick(game_clock, move_delta)
 
-        # Broadcast time + NPC state to all clients
         tick_msg = {
             "type": "tick",
             "time": game_clock.to_dict(),
@@ -128,9 +150,24 @@ async def game_loop():
         await manager.broadcast(tick_msg)
 
 
+async def cognition_loop():
+    """Slow loop — schedules, perception, conversations, reflections.
+
+    Runs independently; may block for seconds on LLM calls.
+    Movement continues uninterrupted via movement_loop.
+    """
+    while True:
+        await asyncio.sleep(1.0)  # cognition checks every ~1s
+        try:
+            await npc_manager.cognition_tick(game_clock, 1.0)
+        except Exception:
+            logger.exception("Cognition tick error")
+
+
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(game_loop())
+    asyncio.create_task(movement_loop())
+    asyncio.create_task(cognition_loop())
 
 
 # ---------- Startup assertion ----------
@@ -196,6 +233,46 @@ async def memory_npc_list():
             "episodic_count": memory_manager.episodic.count(npc.npc_id),
         })
     return result
+
+
+@app.get("/api/debug/npcs")
+async def debug_npcs():
+    """Full NPC diagnostic state — positions, paths, home/work, schedule."""
+    result = []
+    for npc in npc_manager.npcs:
+        schedule_info = []
+        for entry in (npc.daily_schedule or []):
+            schedule_info.append({
+                "slot": entry.slot,
+                "activity": entry.activity,
+                "location": entry.location,
+                "priority": entry.priority,
+            })
+        result.append({
+            "npc_id": npc.npc_id,
+            "name": npc.name,
+            "occupation": npc.occupation,
+            "x": npc.x,
+            "z": npc.z,
+            "home_x": npc.home_x,
+            "home_z": npc.home_z,
+            "work_x": getattr(npc, "work_x", None),
+            "work_z": getattr(npc, "work_z", None),
+            "activity": npc.activity.value if npc.activity else "none",
+            "current_action": npc.current_action_description,
+            "cognition_tier": npc.cognition_tier,
+            "path_length": len(npc.current_path) if npc.current_path else 0,
+            "path_target": list(npc.current_path[-1]) if npc.current_path else None,
+            "conversation_partner": npc.conversation_partner,
+            "schedule": schedule_info,
+            "schedule_day": getattr(npc, "schedule_day", None),
+        })
+    return {
+        "time": game_clock.time_string,
+        "day": game_clock.day,
+        "phase": game_clock.phase.value,
+        "npcs": result,
+    }
 
 
 @app.websocket("/ws")

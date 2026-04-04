@@ -303,6 +303,25 @@ class TestSimulationInvariant:
             # INVARIANT: no resting overlaps
             assert_no_resting_overlaps(npcs)
 
+    def test_nudge_sets_trail(self):
+        """When resolve_overlaps nudges an NPC, it should set _tick_trail
+        so the client can animate the separation."""
+        grid = _make_grid()
+        npcs = [
+            _make_npc("a", 0, 0),
+            _make_npc("b", 0, 0),
+        ]
+        npcs[0]._tick_trail = []
+        npcs[1]._tick_trail = []
+
+        resolve_overlaps(npcs, grid)
+
+        # NPC b should have been nudged and have trail data
+        assert hasattr(npcs[1], '_tick_trail')
+        assert len(npcs[1]._tick_trail) > 0, (
+            "Nudged NPC should have trail data for client animation"
+        )
+
     def test_10_conversations_no_overlaps(self):
         """Simulate 10 conversation pairs positioning. No overlaps allowed."""
         import random
