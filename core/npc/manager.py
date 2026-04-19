@@ -25,10 +25,11 @@ from core.npc.cognition.tiers import (
 from core.npc.cognition.perceive import perceive
 from core.npc.cognition.plan import (
     generate_daily_schedule, resolve_schedule_location,
-    _template_schedule,
+    _template_schedule, should_replan, replan_schedule,
 )
 from core.npc.cognition.execute import (
     execute_tick, set_activity_for_location, navigate_to,
+    clear_arrival_claims,
 )
 from core.npc.cognition.decompose import (
     decompose_schedule_entry, decompose_schedule_entry_llm,
@@ -46,22 +47,38 @@ from core.npc.cognition.router import (
 from core.npc.cognition.planner import DeterministicPlanner, PlannedAction
 from core.npc.economy_tick import EconomyTick
 from core.memory.manager import MemoryManager
-from core.memory.reflection import run_reflection, reflect_on_conversation
+from core.memory.reflection import (
+    run_reflection, run_reflection_with_intents,
+    reflect_on_conversation, ActionIntent,
+    apply_personality_drift, detect_identity_claims,
+    IdentityClaim,
+)
 from core.relationships.sentiment import SentimentTracker
 from core.relationships.structures import FactionManager
 from core.events.impact import EventImpactSystem, GameEvent
 from core.world.spatial_awareness import resolve_overlaps
 from core.world.grid import Grid
 from core.world.generator import PlacedBuilding
+from core.world.town_agenda import TownAgenda, create_goal_from_template
 from core.time_system.clock import GameClock, MINUTES_PER_DAY
+from core.evolution.overseer import Overseer
+from core.evolution.mechanisms import MechanismEngine
+from core.evolution.guardrails import GuardrailEngine
 
 logger = logging.getLogger(__name__)
 
 
 def _force_template_schedule(npc: NPC, current_day: int) -> None:
-    """Assign a template schedule — no LLM, fully deterministic."""
+    """Assign a template schedule — no LLM, fully deterministic.
+
+    Resets schedule_index and action_start_minutes so the new day
+    starts at entry 0 regardless of where the NPC's cursor was on
+    the previous schedule.
+    """
     npc.daily_schedule = _template_schedule(npc)
     npc.schedule_day = current_day
+    npc.schedule_index = 0
+    npc.action_start_minutes = 0.0
     logger.debug(
         "%s: template schedule assigned (deterministic mode)", npc.name,
     )
@@ -121,6 +138,18 @@ class NPCManager:
         # Wire sentiment into conversation module
         set_sentiment_tracker(self.sentiment)
 
+        # Evolution layer: overseer evaluates once per game-day
+        self.overseer = Overseer(llm=self.llm)
+        self.mechanisms = MechanismEngine()
+        self.guardrails = GuardrailEngine()
+        self._last_eval_day: int = -1
+
+        # Collective town goals — overseer proposes, scheduler reads,
+        # client renders. Gives the town a shared sense of direction
+        # beyond individual NPC schedules.
+        self.town_agenda = TownAgenda()
+        self.town_agenda.add_completion_listener(self._on_goal_completed)
+
         # Focus point for tier assignment (defaults to town centre)
         self.focus_x: int = 0
         self.focus_z: int = 0
@@ -134,6 +163,23 @@ class NPCManager:
         # Staggered departures: npc_id -> (delay_remaining_secs, target_x, target_z, description)
         # Delays are in REAL seconds (not game minutes) to guarantee visible spread
         self._pending_departures: dict[str, tuple[float, int, int, str]] = {}
+
+    # Player agent reference — set by server after creation.
+    # When set and autonomous=False, the player NPC is excluded from
+    # automatic cognition loops (schedules, conversations, etc.).
+    player_agent: object | None = None  # PlayerAgent, typed as object to avoid circular import
+
+    def _skip_autonomous(self, npc: NPC) -> bool:
+        """Check if this NPC should be skipped from autonomous cognition.
+
+        Returns True only for the player NPC when autonomous mode is off.
+        When autonomous=True, the player NPC acts like any other NPC.
+        """
+        if npc.npc_id != "player":
+            return False
+        if self.player_agent is None:
+            return False
+        return not self.player_agent.autonomous
 
     def get_npc(self, npc_id: str) -> NPC | None:
         return self._npc_map.get(npc_id)
@@ -166,7 +212,10 @@ class NPCManager:
             self._npc_map[npc.npc_id] = npc
 
         # Seed foundational memories and goals
-        seed_population_memories(self.npcs, self.memory)
+        seed_population_memories(
+            self.npcs, self.memory,
+            sentiment=self.sentiment, rng=self.rng,
+        )
 
         # Stanford: every NPC starts with a schedule and begins their
         # first action immediately. action_start_minutes = 0 so the
@@ -320,11 +369,16 @@ class NPCManager:
         home_tile_obj = self.grid.get_tile(home_x, home_z)
         living_area = home_tile_obj.address if home_tile_obj else "smallville"
 
+        # Snapshot the personality as the spawn baseline so future
+        # drift from emotional reflections decays back toward it.
+        spawn_baseline = personality.copy()
+
         npc = NPC(
             npc_id=npc_id,
             name=name,
             age=age,
             personality=personality,
+            spawn_baseline=spawn_baseline,
             backstory=backstory,
             occupation=occupation,
             x=home_x,
@@ -388,12 +442,45 @@ class NPCManager:
         current_slot = clock.schedule_slot.value
         game_minutes_elapsed = real_delta / clock._real_seconds_per_game_minute()
 
+        # Reset per-tick arrival claims so _arrive() can track
+        # which tiles have been claimed by earlier arrivals this tick.
+        clear_arrival_claims()
+
+        # Reset per-tick trail for every NPC. The trail is meant to
+        # carry THIS tick's discrete movement (a step along a path, an
+        # overlap nudge) to the client so it can animate smoothly.
+        # Without this reset, NPCs that aren't currently walking — in
+        # particular the player, whose trail is only populated when
+        # resolve_overlaps nudges them off an NPC's tile — keep
+        # broadcasting the same stale trail every tick. The client's
+        # trail handling then appends those stale waypoints forever
+        # and the avatar appears frozen far from the real server
+        # position. Clearing here makes the trail field truly
+        # per-tick.
+        for npc in self.npcs:
+            npc._tick_trail = []
+
         # Process pending departures (staggered in real seconds)
         if self._pending_departures:
             self._process_pending_departures(real_delta)
 
-        # Execute movement and actions
+        # Execute movement and actions.
+        #
+        # INVARIANT: the player's position is input-authoritative. Any
+        # code path in this manager that might write to an NPC's (x,z)
+        # must short-circuit on npc_id == "player". The autonomous flag
+        # is about COGNITION (should the player NPC think on its own
+        # when idle?) — it must NEVER re-enable server-side writes to
+        # the player's position. Two prior bugs landed because
+        # different nudge paths (resolve_overlaps, _arrive inside
+        # execute_tick) each needed to learn this separately; keeping
+        # the player out of execute_tick entirely closes the whole
+        # class of "avatar moves by itself" bugs at the source.
         for npc in self.npcs:
+            if npc.npc_id == "player":
+                continue
+            if self._skip_autonomous(npc):
+                continue
             if (npc.cognition_tier >= 4
                     and not npc.current_path
                     and npc.activity != ActivityState.WALKING):
@@ -407,6 +494,14 @@ class NPCManager:
 
         # Safety net: resolve any resting NPCs that share a tile
         resolve_overlaps(self.npcs, self.grid)
+
+        # Safety net #2: teleport NPCs back to their home if they've
+        # somehow drifted absurdly far from any landmark they care
+        # about (home, work, current schedule target). Over long runs
+        # a small constant drift from resolve_overlaps' spread can
+        # accumulate and park NPCs at the map border. Without this
+        # we observed NPCs lined up at x=-30 after ~40 game days.
+        self._reanchor_strays()
 
         # Economy tick
         current_minutes = clock.day * MINUTES_PER_DAY + clock.minutes
@@ -437,12 +532,43 @@ class NPCManager:
 
         self._last_slot = current_slot
 
+        # 0. Daily sentiment decay — drift all dimensions toward zero
+        if not hasattr(self, "_last_decay_day"):
+            self._last_decay_day = -1
+        if current_day != self._last_decay_day:
+            self._last_decay_day = current_day
+            decayed = self.sentiment.decay_all(current_minutes)
+            if decayed:
+                logger.debug("Sentiment decay applied to %d relationships", decayed)
+            # Personality drift decays back toward spawn baselines on the
+            # same cadence. Keeps the Big-5 vector bounded while still
+            # allowing strong recent events to be visible for days.
+            self._decay_personalities()
+
+        # 0b. Daily overseer evaluation — score population, detect issues, intervene
+        if current_day != self._last_eval_day and current_day > 0:
+            self._last_eval_day = current_day
+            await self._run_overseer_eval(current_day, current_minutes)
+
         # 1. Update tiers based on focus point
         update_all_tiers(self.npcs, self.focus_x, self.focus_z)
 
+        # 1b. Schedule-cursor safety net. Over long runs we've observed
+        #     NPCs end up with (schedule_index > 0, daily_schedule=[])
+        #     — typically from an exception mid-_advance_npc_action or
+        #     from an LLM/planner regen that left the schedule empty
+        #     without resetting the cursor. That state is unrecoverable
+        #     by the cycling loop (step 2 needs schedule_day to match
+        #     current_day to skip regen; step 3 bails on empty). Repair
+        #     here is cheap and closes the whole class.
+        self._normalise_schedule_cursors()
+
         # 2. Schedule generation (router decides LLM vs deterministic)
+        # Player NPC excluded — player movement is input-driven
         schedule_tasks = []
         for npc in self.npcs:
+            if self._skip_autonomous(npc):
+                continue
             if npc.cognition_tier < 4 and npc.needs_new_schedule(current_day):
                 if self.deterministic:
                     # Template-only mode — bypass LLM entirely
@@ -470,11 +596,37 @@ class NPCManager:
             import asyncio
             await asyncio.gather(*schedule_tasks)
 
+        # 2b. Inject town-goal entries into NPCs whose schedules were
+        #     just (re)generated today. This is what turns the town
+        #     agenda from a piece of state into visible collective
+        #     behaviour — matching NPCs will walk to the goal location
+        #     and contribute during the goal's slot.
+        for npc in self.npcs:
+            if self._skip_autonomous(npc) or npc.cognition_tier >= 4:
+                continue
+            if getattr(npc, "schedule_day", None) != current_day:
+                continue
+            if getattr(npc, "_goal_injected_for_day", None) == current_day:
+                continue
+            self._inject_goal_entry(npc, current_day)
+            npc._goal_injected_for_day = current_day
+
+        # 2c. Bed-time enforcement. Schedule entries are duration-
+        #     based, so a badly-sized entry can keep an NPC at work
+        #     past midnight if its own timer hasn't expired. Game
+        #     design needs "at night, NPCs are home" to be a hard
+        #     invariant: it's the most legible failure mode (players
+        #     see NPCs wandering at 2 AM and lose all immersion).
+        #     During the night phase, fast-forward any non-home NPC
+        #     to their final sleep entry.
+        if current_slot == "night":
+            await self._enforce_bedtime(current_slot, current_minutes)
+
         # 3. Stanford action-duration cycling — each NPC independently
         #    advances to the next schedule entry when their current
         #    action's duration expires. No global slot transitions.
         for npc in self.npcs:
-            if npc.cognition_tier >= 4:
+            if self._skip_autonomous(npc) or npc.cognition_tier >= 4:
                 continue
             if not npc.daily_schedule:
                 continue
@@ -500,12 +652,17 @@ class NPCManager:
         #    Skip during night — NPCs should be sleeping, not reacting
         if current_slot != "night":
             for npc in self.npcs:
+                if self._skip_autonomous(npc):
+                    continue
                 if should_perceive(npc, current_minutes):
-                    observations = perceive(npc, self.grid, self.npcs, current_minutes)
+                    observations = perceive(
+                        npc, self.grid, self.npcs, current_minutes,
+                        sentiment=self.sentiment,
+                    )
 
                     for obs in observations:
                         tile = self.grid.get_tile(obs.x, obs.z)
-                        await self.memory.record_observation(
+                        await self.memory.store_perception(
                             npc_id=npc.npc_id,
                             description=obs.description,
                             category=obs.category,
@@ -515,6 +672,7 @@ class NPCManager:
                             location_z=obs.z,
                             tile_sector=tile.sector if tile else "",
                             tile_arena=tile.arena if tile else "",
+                            mentioned_npc_id=obs.subject_npc_id,
                         )
 
                     if observations:
@@ -550,6 +708,10 @@ class NPCManager:
             self._reflection_check_counter = 0
             await self._check_reflections(current_minutes)
 
+        # 8. Mid-day replanning for Tier 1-2 NPCs
+        if not self.deterministic and current_slot != "night":
+            await self._check_replans(current_minutes, current_slot)
+
     async def tick(
         self,
         clock: GameClock,
@@ -574,42 +736,64 @@ class NPCManager:
         # Advance to next schedule entry
         npc.schedule_index += 1
 
-        # Schedule exhausted — regenerate for new cycle
+        # Schedule exhausted — loop or regenerate
         if npc.schedule_index >= len(npc.daily_schedule):
-            if self.deterministic:
+            if npc.has_custom_schedule:
+                # Custom schedules loop indefinitely
+                pass
+            elif self.deterministic:
                 _force_template_schedule(npc, npc.schedule_day + 1)
             else:
                 npc.daily_schedule = []  # triggers regeneration next tick
             npc.schedule_index = 0
-            npc.action_start_minutes = current_minutes
+            # Reset to 0.0 so the first-dispatch logic (action_start_minutes == 0.0)
+            # fires on the next cognition tick and sends the NPC to their new location.
+            npc.action_start_minutes = 0.0
             return
 
         entry = npc.daily_schedule[npc.schedule_index]
         npc.action_start_minutes = current_minutes
 
-        # Sleep entries: force-end conversations so NPCs go home.
-        # Stanford: sleep is just an action, but NPCs must actually
-        # walk home — they can't chat all night at the tavern.
-        is_sleep = entry.location == "home" and "sleep" in entry.activity.lower()
-        if npc.conversation_partner and is_sleep:
-            other = self.get_npc(npc.conversation_partner)
-            if other:
-                await end_conversation(npc, other)
-                # end_conversation sets _needs_post_convo_dispatch on both,
-                # but we handle the sleep NPC directly below — clear the flag
-                # to prevent double-dispatch in movement_tick.
-                npc._needs_post_convo_dispatch = False
+        # Wrap the dispatch side of the advance in try/except so that a
+        # downstream failure (e.g. pathfinding throws on a weird target,
+        # conversation end fails) can't strand the NPC mid-advance with
+        # an incremented cursor and no dispatched action. On failure we
+        # surrender the advance: keep the new cursor (the entry is
+        # theoretically valid) but flag a post-convo dispatch so the
+        # movement tick's fallback path redispatches next tick.
+        try:
+            # Sleep entries: force-end conversations so NPCs go home.
+            # Stanford: sleep is just an action, but NPCs must actually
+            # walk home — they can't chat all night at the tavern.
+            is_sleep = entry.location == "home" and "sleep" in entry.activity.lower()
+            if npc.conversation_partner and is_sleep:
+                other = self.get_npc(npc.conversation_partner)
+                if other:
+                    await end_conversation(
+                        npc, other, memory_manager=self.memory,
+                    )
+                    # end_conversation sets _needs_post_convo_dispatch on both,
+                    # but we handle the sleep NPC directly below — clear the flag
+                    # to prevent double-dispatch in movement_tick.
+                    npc._needs_post_convo_dispatch = False
 
-        # NPCs in conversation (non-sleep): don't dispatch, pick up on end
-        if npc.conversation_partner:
-            return
+            # NPCs in conversation (non-sleep): don't dispatch, pick up on end
+            if npc.conversation_partner:
+                return
 
-        # Don't interrupt walking NPCs — they finish their path first
-        if npc.activity == ActivityState.WALKING and npc.current_path:
+            # Don't interrupt walking NPCs — they finish their path first
+            if npc.activity == ActivityState.WALKING and npc.current_path:
+                npc._needs_post_convo_dispatch = True
+                return
+
+            await self._dispatch_to_entry(npc, entry, current_slot)
+        except Exception:
+            logger.exception(
+                "ADVANCE %s: dispatch failed on idx=%d (%s) — flagging "
+                "post-convo redispatch",
+                npc.name, npc.schedule_index, entry.activity,
+            )
             npc._needs_post_convo_dispatch = True
-            return
-
-        await self._dispatch_to_entry(npc, entry, current_slot)
 
     async def _dispatch_to_entry(
         self, npc: NPC, entry: ScheduleEntry, current_slot: str,
@@ -634,6 +818,22 @@ class NPCManager:
                 entry, npc, self.buildings,
             )
         target_x, target_z = self._spread_destination(npc, target_x, target_z)
+
+        # Persist the resolved coordinates on the entry immediately.
+        # Without this, post-conversation redispatch or schedule inspection
+        # would re-resolve to the raw home/work tile and cause re-stacking.
+        entry.target_x = target_x
+        entry.target_z = target_z
+
+        # If the NPC is already near this target (within 1 tile) and at
+        # a free tile, don't re-navigate — stay put. Prevents vibration
+        # from being sent 1 tile away and back every schedule cycle.
+        if not npc.is_at(target_x, target_z) and npc.distance_to(target_x, target_z) <= 1.5:
+            occupied = self._get_all_claimed_tiles(exclude_npc_id=npc.npc_id)
+            if (npc.tile_x, npc.tile_z) not in occupied:
+                target_x, target_z = npc.tile_x, npc.tile_z
+                entry.target_x = target_x
+                entry.target_z = target_z
 
         # Already at destination — decompose and start activity
         if npc.is_at(target_x, target_z):
@@ -667,9 +867,12 @@ class NPCManager:
                 npc.name, entry.activity, target_x, target_z,
             )
         else:
-            # No path — snap to destination (pathfinding failure)
-            npc.x = float(target_x)
-            npc.z = float(target_z)
+            # No path — snap to nearest free tile at destination
+            sx, sz = self._spread_destination(npc, target_x, target_z)
+            npc.x = float(sx)
+            npc.z = float(sz)
+            entry.target_x = sx
+            entry.target_z = sz
             set_activity_for_location(npc, current_slot)
             logger.warning(
                 "ACTION %s: no path to (%d,%d), snapping",
@@ -739,13 +942,14 @@ class NPCManager:
                             npc.name, tx, tz, desc,
                         )
                     else:
-                        # No path — snap to destination rather than
-                        # sleeping on the road mid-journey.
-                        npc.x = float(tx)
-                        npc.z = float(tz)
+                        # No path — snap to nearest free tile at
+                        # destination rather than raw target (avoids stacking).
+                        sx, sz = self._spread_destination(npc, tx, tz)
+                        npc.x = float(sx)
+                        npc.z = float(sz)
                         logger.info(
-                            "DEPART %s: no path to (%d,%d), snapping",
-                            npc.name, tx, tz,
+                            "DEPART %s: no path to (%d,%d), snapping to (%d,%d)",
+                            npc.name, tx, tz, sx, sz,
                         )
                         set_activity_for_location(
                             npc, self._last_slot,
@@ -757,31 +961,52 @@ class NPCManager:
         for npc_id in completed:
             del self._pending_departures[npc_id]
 
+    def _get_all_claimed_tiles(
+        self, exclude_npc_id: str = "",
+    ) -> set[tuple[int, int]]:
+        """Build the full set of tiles that are occupied OR claimed.
+
+        Includes:
+        - Resting NPC positions (standard occupied set)
+        - Destinations of walking NPCs (path endpoint)
+        - Targets of pending staggered departures
+
+        This prevents two NPCs from being dispatched to the same
+        tile even when one is still walking there.
+        """
+        from core.world.spatial_awareness import get_occupied_tiles
+        claimed = get_occupied_tiles(self.npcs)
+
+        # Add destinations of walking NPCs
+        for o in self.npcs:
+            if o.npc_id == exclude_npc_id:
+                continue
+            if o.activity == ActivityState.WALKING and o.current_path:
+                dest = o.current_path[-1]
+                claimed.add(dest)
+
+        # Add targets of pending departures
+        for npc_id, (_, tx, tz, _) in self._pending_departures.items():
+            if npc_id == exclude_npc_id:
+                continue
+            claimed.add((tx, tz))
+
+        return claimed
+
     def _spread_destination(
         self, npc: NPC, target_x: int, target_z: int,
     ) -> tuple[int, int]:
         """
-        If the target tile is already claimed by a resting NPC,
-        find the nearest passable unoccupied neighbour instead.
+        If the target tile is already claimed by any NPC (resting,
+        walking toward, or pending departure), find the nearest
+        passable unclaimed neighbour instead.
 
         Door-aware: if the target is a building door, prefer the
         approach tile (one south of door) before spiralling randomly.
         This prevents NPCs entering buildings off-centre.
         """
-        from core.world.spatial_awareness import get_occupied_tiles, find_rest_tile
-        occupied = get_occupied_tiles(self.npcs)
-
-        # Exclude this NPC from occupied set
-        npc_pos = (npc.tile_x, npc.tile_z)
-        if npc_pos in occupied:
-            others_on_tile = any(
-                o.npc_id != npc.npc_id
-                and not o.activity == ActivityState.WALKING
-                and o.tile_x == npc.tile_x and o.tile_z == npc.tile_z
-                for o in self.npcs
-            )
-            if not others_on_tile:
-                occupied = occupied - {npc_pos}
+        from core.world.spatial_awareness import find_rest_tile
+        occupied = self._get_all_claimed_tiles(exclude_npc_id=npc.npc_id)
 
         # Check if target is free first (fast path)
         tile = self.grid.get_tile(target_x, target_z)
@@ -825,11 +1050,16 @@ class NPCManager:
                 )
 
         # Check for new conversation opportunities (tier 1-3 only)
+        # Player NPC is excluded — player conversations are initiated via chat input
         for npc in self.npcs:
+            if self._skip_autonomous(npc):
+                continue
             if npc.conversation_partner or npc.cognition_tier >= 4:
                 continue
             for other in self.npcs:
                 if other.npc_id == npc.npc_id or other.conversation_partner:
+                    continue
+                if self._skip_autonomous(other):
                     continue
                 if should_initiate_conversation(npc, other, current_minutes):
                     await initiate_conversation(
@@ -881,23 +1111,50 @@ class NPCManager:
             ))
 
             # Post-conversation reflection (router decides)
-            for npc, other_name in [
-                (npc_a, npc_b.name), (npc_b, npc_a.name),
+            for npc, other_id, other_name in [
+                (npc_a, npc_b.npc_id, npc_b.name),
+                (npc_b, npc_a.npc_id, npc_a.name),
             ]:
                 rd = self.router.route(
                     npc, "reflection",
                     focus_x=self.focus_x, focus_z=self.focus_z,
                 )
+                insight: str | None = None
                 if rd.route == Route.LLM:
-                    await reflect_on_conversation(
+                    insight = await reflect_on_conversation(
                         npc, other_name, exchanges,
                         self.memory, self.llm, current_minutes,
                     )
 
+                # Personality drift from the conversation text itself —
+                # applies even when the reflection step was skipped.
+                convo_text = " ".join(
+                    e.get("message", "") for e in exchanges
+                )
+                apply_personality_drift(npc, convo_text, importance=0.6)
+                if insight:
+                    apply_personality_drift(npc, insight, importance=0.8)
+
+                # Identity-claim detection — the other party may have
+                # made a self-concept-altering claim about us. Each
+                # match is filtered/scored in _inject_self_concept_delta
+                # to avoid credulously accepting every role assertion.
+                claims = detect_identity_claims(
+                    exchanges, listener_name=npc.name, speaker_id=other_id,
+                )
+                for claim in claims:
+                    self._inject_self_concept_delta(
+                        npc, claim, current_minutes,
+                    )
+
     async def _check_reflections(self, current_minutes: float) -> None:
-        """Check if any NPCs need a full reflection cycle (router decides)."""
+        """Check if any NPCs need a full reflection cycle (router decides).
+
+        When a reflection produces an action intent, injects a temporary
+        schedule entry so the NPC acts on their insight.
+        """
         for npc in self.npcs:
-            if npc.cognition_tier >= 4:
+            if self._skip_autonomous(npc) or npc.cognition_tier >= 4:
                 continue
             if not self.memory.should_reflect(npc.npc_id, current_minutes):
                 continue
@@ -906,9 +1163,487 @@ class NPCManager:
                 focus_x=self.focus_x, focus_z=self.focus_z,
             )
             if rd.route == Route.LLM:
-                await run_reflection(
+                insights, intents = await run_reflection_with_intents(
                     npc, self.memory, self.llm, current_minutes,
                 )
+                for intent in intents:
+                    self._inject_reflection_entry(npc, intent)
+                # Personality drift — emotional reflections nudge the
+                # Big-5 vector. A reflection is by definition high-
+                # importance, so we use a fixed 0.8 unless the memory
+                # manager tags a stronger one later.
+                for insight in insights:
+                    apply_personality_drift(npc, insight, importance=0.8)
+
+    def _inject_reflection_entry(
+        self, npc: NPC, intent: ActionIntent,
+    ) -> None:
+        """Insert a temporary schedule entry from a reflection action intent.
+
+        The entry is placed at schedule_index + 1 so the NPC transitions
+        to it after their current action. Once it completes, the NPC
+        resumes their normal schedule — no permanent modification.
+        """
+        if not npc.daily_schedule:
+            return
+
+        entry = ScheduleEntry(
+            slot="reflection",
+            activity=intent.activity,
+            location=intent.location,
+            priority=7,  # high priority — reflection-driven
+            duration_minutes=intent.duration_minutes,
+        )
+
+        insert_pos = min(
+            npc.schedule_index + 1, len(npc.daily_schedule),
+        )
+        npc.daily_schedule.insert(insert_pos, entry)
+
+        logger.info(
+            "INJECT %s: '%s' at %s (%d min) inserted at index %d",
+            npc.name, intent.activity, intent.location,
+            intent.duration_minutes, insert_pos,
+        )
+
+    # How much of the gap to a contradicting belief must be crossed
+    # before we refuse to apply a new identity claim. 0.5 means "if
+    # the listener is already ≥0.5 sure of the opposite, reject".
+    _IDENTITY_CONTRADICTION_FLOOR: float = 0.5
+
+    # Map claim prefixes to the prefixes that would directly contradict
+    # them. Used by _inject_self_concept_delta so that, for instance,
+    # a strong friend_of:X belief dampens or rejects an enemy_of:X
+    # claim arriving later in conversation.
+    _CONTRADICTING_PREFIXES: dict[str, tuple[str, ...]] = {
+        "friend_of": ("enemy_of", "rival_of", "betrayed"),
+        "enemy_of": ("friend_of",),
+        "rival_of": ("friend_of",),
+        "helped": ("betrayed",),
+        "betrayed": ("helped", "saved"),
+        "saved": ("betrayed",),
+    }
+
+    def _inject_self_concept_delta(
+        self, npc: NPC, claim: IdentityClaim,
+        current_minutes: float,
+    ) -> bool:
+        """Apply an identity claim to the NPC's self_concept.
+
+        Returns True if the claim was applied (in any amount), False if
+        it was rejected for contradicting an existing strong belief.
+        A faint contradicting memory dampens the delta rather than
+        rejecting outright — identity is allowed to drift, just slowly.
+        """
+        prefix, _, target = claim.key.partition(":")
+
+        # Check for a direct contradiction: do we already strongly
+        # believe something opposite? e.g. friend_of:bran vs enemy_of:bran.
+        contradict_prefixes = self._CONTRADICTING_PREFIXES.get(prefix, ())
+        strongest_opposing = 0.0
+        for other_key, other_conf in npc.self_concept.items():
+            other_prefix, _, other_target = other_key.partition(":")
+            if other_target != target:
+                continue
+            if other_prefix in contradict_prefixes:
+                strongest_opposing = max(strongest_opposing, other_conf)
+
+        if strongest_opposing >= self._IDENTITY_CONTRADICTION_FLOOR:
+            logger.info(
+                "IDENTITY %s: rejected '%s' (contradicts existing "
+                "belief, strength=%.2f)",
+                npc.name, claim.key, strongest_opposing,
+            )
+            return False
+
+        # Dampen the delta by any weaker contradiction so the belief
+        # shifts gradually instead of flipping on one line.
+        damping = max(0.0, 1.0 - 2 * strongest_opposing)
+        effective_delta = claim.confidence_delta * damping
+
+        new_confidence = npc.apply_self_concept_delta(
+            claim.key, effective_delta,
+        )
+        logger.info(
+            "IDENTITY %s: '%s' +%.2f → %.2f (from: %r)",
+            npc.name, claim.key, effective_delta, new_confidence,
+            claim.source_text,
+        )
+        return True
+
+    # Per-day fraction of the gap between current personality and
+    # spawn baseline that decays back. Small enough that drift from
+    # strong events still shows up for many days; large enough to
+    # keep an NPC's character recognisable over a long run.
+    _PERSONALITY_DECAY_RATE: float = 0.02
+
+    def _normalise_schedule_cursors(self) -> None:
+        """Repair invalid (schedule_index, daily_schedule) combinations.
+
+        Three out-of-range states can arise from exceptions during
+        `_advance_npc_action`, from LLM/planner regen that leaves the
+        schedule empty, or from a replan that truncates below the
+        current cursor:
+
+        - daily_schedule == [] but schedule_index != 0: no entry to
+          point at; reset cursor so regeneration restarts cleanly.
+        - schedule_index >= len(daily_schedule) on a non-empty schedule:
+          the cursor has walked off the end; wrap to 0 and force a
+          fresh anchor.
+        - action_start_minutes is non-zero on an empty schedule: would
+          make the next first-dispatch path skip its anchor step.
+
+        Fires each cognition tick before schedule generation (step 2).
+        """
+        for npc in self.npcs:
+            if self._skip_autonomous(npc):
+                continue
+            if not npc.daily_schedule:
+                if npc.schedule_index != 0 or npc.action_start_minutes != 0.0:
+                    logger.info(
+                        "SCHED-FIX %s: empty schedule with idx=%d start=%.1f "
+                        "— resetting",
+                        npc.name, npc.schedule_index, npc.action_start_minutes,
+                    )
+                    npc.schedule_index = 0
+                    npc.action_start_minutes = 0.0
+            elif npc.schedule_index >= len(npc.daily_schedule):
+                logger.info(
+                    "SCHED-FIX %s: idx=%d out of range (len=%d) — wrapping",
+                    npc.name, npc.schedule_index, len(npc.daily_schedule),
+                )
+                npc.schedule_index = 0
+                npc.action_start_minutes = 0.0
+
+    def _decay_personalities(self) -> None:
+        """Drift every NPC's personality back toward their spawn baseline.
+
+        Runs once per game day alongside sentiment decay. NPCs with no
+        baseline (e.g. custom-seeded test NPCs) are skipped silently.
+        """
+        for npc in self.npcs:
+            if npc.spawn_baseline is None:
+                continue
+            npc.personality.nudge_toward(
+                npc.spawn_baseline, self._PERSONALITY_DECAY_RATE,
+            )
+
+    # Maximum Manhattan distance an NPC may be from their nearest
+    # landmark (home, work, or current schedule target) before the
+    # stray-catcher teleports them back to their home. Generous enough
+    # to allow long walks across the map; tight enough that ending up
+    # at the grid border is caught.
+    _STRAY_DISTANCE_LIMIT = 25
+
+    async def _enforce_bedtime(
+        self, current_slot: str, current_minutes: float,
+    ) -> None:
+        """Force every NPC toward their sleep-at-home entry at night.
+
+        Walks through each NPC. If they are in conversation, end it
+        (sleeping NPCs can't chat). If their current schedule entry
+        isn't a home-sleep entry and they're not heading home, jump
+        their schedule_index to the last entry (which is guaranteed
+        to be a sleep-home by the parser/template invariant) and
+        dispatch. This makes "NPCs are home at night" a property of
+        the simulation rather than an emergent accident.
+        """
+        for npc in self.npcs:
+            if self._skip_autonomous(npc) or npc.cognition_tier >= 4:
+                continue
+            if not npc.daily_schedule:
+                continue
+
+            idx = npc.schedule_index
+            if 0 <= idx < len(npc.daily_schedule):
+                entry = npc.daily_schedule[idx]
+                is_sleep_home = (
+                    entry.location == "home"
+                    and ("sleep" in entry.activity.lower()
+                         or "walk home" in entry.activity.lower())
+                )
+            else:
+                is_sleep_home = False
+
+            if is_sleep_home:
+                continue  # already going or going home to sleep
+
+            # End any conversation so the NPC can leave.
+            if npc.conversation_partner:
+                other = self.get_npc(npc.conversation_partner)
+                if other:
+                    await end_conversation(
+                        npc, other, memory_manager=self.memory,
+                    )
+                npc._needs_post_convo_dispatch = False
+
+            # Jump to the last entry — by invariant this is sleep-at-home.
+            npc.schedule_index = max(0, len(npc.daily_schedule) - 1)
+            npc.action_start_minutes = current_minutes
+            entry = npc.daily_schedule[npc.schedule_index]
+            await self._dispatch_to_entry(npc, entry, current_slot)
+
+    def _reanchor_strays(self) -> None:
+        """Teleport any NPC that's drifted past _STRAY_DISTANCE_LIMIT
+        from every landmark they care about back to their home.
+
+        Walking NPCs are exempt — they may legitimately be partway
+        across the map. This only fires on resting (non-walking)
+        NPCs, who have no reason to be 30 tiles from home.
+        """
+        for npc in self.npcs:
+            if npc.npc_id == "player":
+                continue
+            if npc.activity == ActivityState.WALKING and npc.current_path:
+                continue
+            anchors: list[tuple[int, int]] = [
+                (npc.home_x, npc.home_z),
+            ]
+            if getattr(npc, "work_x", None) is not None:
+                anchors.append((npc.work_x, npc.work_z))
+            # Current schedule target (if any)
+            if npc.daily_schedule and 0 <= npc.schedule_index < len(npc.daily_schedule):
+                entry = npc.daily_schedule[npc.schedule_index]
+                if entry.target_x is not None and entry.target_z is not None:
+                    anchors.append((entry.target_x, entry.target_z))
+
+            nearest = min(
+                abs(npc.x - ax) + abs(npc.z - az) for ax, az in anchors
+            )
+            if nearest <= self._STRAY_DISTANCE_LIMIT:
+                continue
+
+            logger.warning(
+                "STRAY %s at (%.0f,%.0f) — %d tiles from nearest anchor, "
+                "teleporting home to (%d,%d)",
+                npc.name, npc.x, npc.z, nearest, npc.home_x, npc.home_z,
+            )
+            npc.x = float(npc.home_x)
+            npc.z = float(npc.home_z)
+            npc.current_path = []
+            npc.path_index = 0
+            npc._tick_trail = [(npc.home_x, npc.home_z)]
+
+    def _inject_goal_entry(self, npc: NPC, current_day: int) -> None:
+        """If the NPC matches an active town goal, inject the goal entry.
+
+        Places the entry in the afternoon slot (where possible) so
+        breakfast and morning work still happen. Replaces an existing
+        afternoon slot rather than appending, to keep schedule total
+        duration intact. Records contribution immediately — the NPC
+        is on the hook even if they haven't physically arrived yet.
+        The goal's completion triggers a town-event broadcast.
+        """
+        goal = self.town_agenda.matching_goal_for(npc)
+        if goal is None or not npc.daily_schedule:
+            return
+
+        # Find an afternoon or evening slot to commandeer. If none,
+        # bail out rather than break the schedule.
+        preferred_slots = ("afternoon", "evening", "morning")
+        target_idx = None
+        for slot in preferred_slots:
+            for i, e in enumerate(npc.daily_schedule):
+                if e.slot == slot:
+                    target_idx = i
+                    break
+            if target_idx is not None:
+                break
+        if target_idx is None:
+            return
+
+        original = npc.daily_schedule[target_idx]
+        npc.daily_schedule[target_idx] = ScheduleEntry(
+            slot=original.slot,
+            activity=goal.activity_text,
+            location=goal.location_hint,
+            priority=8,
+            duration_minutes=min(goal.duration_minutes, original.duration_minutes or goal.duration_minutes),
+        )
+        # Stash the goal id on the entry so we can credit the NPC
+        # when they actually arrive / the duration elapses.
+        setattr(npc.daily_schedule[target_idx], "town_goal_id", goal.goal_id)
+
+        # Eager contribution: record it on injection. The physical
+        # arrival and activity is what the player sees; the book-
+        # keeping here ensures the agenda progresses deterministically
+        # even if an NPC gets pulled into a conversation en route.
+        completed = self.town_agenda.record_contribution(goal.goal_id, npc.npc_id)
+        logger.info(
+            "AGENDA %s: committed to '%s' (%d/%d%s)",
+            npc.name, goal.title, goal.progress,
+            goal.required_contributions,
+            ", COMPLETED" if completed else "",
+        )
+
+    async def _check_replans(
+        self, current_minutes: float, current_slot: str,
+    ) -> None:
+        """Mid-day replanning for Tier 1-2 NPCs.
+
+        Asks the LLM whether the NPC wants to modify their remaining
+        schedule based on recent perceptions and reflections. If the
+        LLM returns new entries, the remaining schedule is replaced
+        and the NPC is re-dispatched to the new current entry.
+        """
+        for npc in self.npcs:
+            if self._skip_autonomous(npc):
+                continue
+            if not should_replan(npc, current_minutes):
+                continue
+
+            rd = self.router.route(
+                npc, "daily_schedule",
+                focus_x=self.focus_x, focus_z=self.focus_z,
+            )
+            if rd.route != Route.LLM:
+                npc.last_replan_minutes = current_minutes
+                continue
+
+            # Gather context for the replan prompt
+            recent_episodic = self.memory.episodic.get_recent(
+                npc.npc_id, limit=5,
+            )
+            perceptions = [m.description for m in recent_episodic
+                           if m.category in ("observation", "conversation")]
+            reflections = [m.description for m in recent_episodic
+                           if m.category == "reflection"]
+            rel_summary = self._build_relationship_summary(npc)
+
+            changed = await replan_schedule(
+                npc, self.llm, current_minutes,
+                recent_perceptions=perceptions,
+                recent_reflections=reflections,
+                relationship_summary=rel_summary,
+            )
+
+            if changed:
+                # Re-dispatch to the current entry under the new schedule
+                if npc.schedule_index < len(npc.daily_schedule):
+                    entry = npc.daily_schedule[npc.schedule_index]
+                    await self._dispatch_to_entry(npc, entry, current_slot)
+
+    async def _run_overseer_eval(
+        self, current_day: int, current_minutes: float,
+    ) -> None:
+        """Run daily overseer evaluation: score, detect, intervene."""
+        try:
+            report = await self.overseer.evaluate(
+                self.npcs, current_day,
+                sentiment=self.sentiment,
+                memory=self.memory,
+            )
+
+            # Expire old policies and modifiers
+            self.mechanisms.expire_old(current_day)
+
+            # Filter interventions through guardrails
+            allowed = self.guardrails.filter_interventions(
+                report.interventions, self.npcs, current_day,
+            )
+
+            # Apply allowed interventions
+            for intervention in allowed:
+                if self.mechanisms.apply_intervention(
+                    intervention, self.npcs, current_day,
+                ):
+                    self.guardrails.record_applied(current_day)
+
+            # Clamp any out-of-bounds NPC parameters
+            self.guardrails.enforce_bounds(self.npcs)
+
+            if allowed:
+                logger.info(
+                    "Overseer day %d: %d interventions applied (of %d proposed)",
+                    current_day, len(allowed), len(report.interventions),
+                )
+        except Exception as e:
+            logger.warning("Overseer evaluation failed on day %d: %s", current_day, e)
+
+        # Town-level goal proposal. Rule-driven for now — the overseer
+        # watches population state and adds goals that match the mood.
+        # Future work: have the overseer LLM propose goals directly.
+        try:
+            self._propose_town_goals(current_day)
+            expired = self.town_agenda.expire_overdue(current_day)
+            for goal in expired:
+                logger.info("Town goal expired: %s", goal.title)
+        except Exception:
+            logger.exception("Town agenda update failed")
+
+    def _propose_town_goals(self, current_day: int) -> None:
+        """Rule-based goal proposer. Cheap, deterministic, extensible.
+
+        Each rule inspects the population and — if its trigger matches —
+        asks the agenda to propose a goal. Cooldowns are enforced by
+        TownAgenda so the same goal doesn't re-trigger every day.
+        """
+        # 1. Every 6th day-ish: hold a harvest festival. This is the
+        #    'heartbeat' social event that gives the town a recurring
+        #    collective activity.
+        if current_day >= 2 and current_day % 6 in (0, 1):
+            goal = create_goal_from_template("harvest_festival", current_day)
+            if goal:
+                self.town_agenda.propose(goal, current_day)
+
+        # 2. When sentiment has drifted negative on average, call a
+        #    town council so the NPCs convene and work it out.
+        avg_disposition = self._average_disposition()
+        if avg_disposition < -8.0:
+            goal = create_goal_from_template("town_council", current_day)
+            if goal:
+                self.town_agenda.propose(goal, current_day)
+
+        # 3. Every ~10 days, schedule bridge repair (placeholder for
+        #    construction/damage integration).
+        if current_day >= 3 and current_day % 10 == 3:
+            goal = create_goal_from_template("repair_bridge", current_day)
+            if goal:
+                self.town_agenda.propose(goal, current_day)
+
+    def _average_disposition(self) -> float:
+        """Average dispositional sentiment across all tracked pairs.
+
+        Walks every NPC's outgoing relationships. Cheap enough at
+        our population scale; if the town grows, swap in a cached
+        aggregate computed once per tick.
+        """
+        scores: list[float] = []
+        for npc in self.npcs:
+            if npc.npc_id == "player":
+                continue
+            try:
+                rels = self.sentiment.get_all_for(npc.npc_id)
+            except Exception:
+                rels = []
+            for r in rels:
+                scores.append(r.overall_disposition())
+        if not scores:
+            return 0.0
+        return sum(scores) / len(scores)
+
+    def _on_goal_completed(self, goal) -> None:
+        """Callback: record a town event when a goal completes.
+
+        Fires a data-driven event through the existing impact system
+        so sentiment and narrative ripples naturally. Gives completed
+        goals a lasting mark on the town rather than just clearing
+        from the agenda.
+        """
+        try:
+            self.events.process_event(GameEvent(
+                event_type="town_goal_completed",
+                participants=list(goal.contributors),
+                data={"goal_id": goal.goal_id, "title": goal.title},
+                game_time=self._current_minutes,
+                location_x=0, location_z=0,
+            ))
+            logger.info(
+                "Town goal completed: %s (%d contributors)",
+                goal.title, len(goal.contributors),
+            )
+        except Exception:
+            logger.exception("Failed to fire town_goal_completed event")
 
     def _build_tick_state(self) -> dict[str, Any]:
         """Build the NPC state update for WebSocket broadcast."""
@@ -921,6 +1656,7 @@ class NPCManager:
             "conversations": conversations,
             "world_state": self.events.get_world_state(),
             "economy": self.economy.get_state(),
+            "town_agenda": self.town_agenda.to_dict(),
         }
 
     def _generate_deterministic_schedule(
@@ -939,6 +1675,16 @@ class NPCManager:
         if entry:
             npc.daily_schedule = [entry]
             npc.schedule_day = current_day
+            # Must also rewind the cursor and clear the action anchor,
+            # otherwise an NPC coming off an exhausted 7-entry schedule
+            # (idx=0, start=0 after _advance_npc_action) is fine, but
+            # one coming off a mid-day replan or a previous 1-entry
+            # deterministic schedule could still carry idx>0 / a stale
+            # start_minutes. The normalise pass catches this too, but
+            # doing it at the assignment site keeps the invariant
+            # local to the write.
+            npc.schedule_index = 0
+            npc.action_start_minutes = 0.0
             # Pre-decompose into sub-tasks so NPC is never idle on arrival
             subtasks = decompose_schedule_entry(npc, entry, npc._rng)
             npc.subtask_queue = subtasks
@@ -1048,6 +1794,72 @@ class NPCManager:
         """Update the camera/player focus point for tier assignment."""
         self.focus_x = x
         self.focus_z = z
+
+    def assign_custom_schedule(
+        self, npc_id: str, entries: list[dict],
+    ) -> tuple[bool, str]:
+        """Assign a custom schedule to a specific NPC.
+
+        entries format: [
+            {"activity": "stand guard at the bridge", "location": "bridge",
+             "target_x": 15, "target_z": 0, "duration_minutes": 900},
+            {"activity": "walk home and sleep", "location": "home",
+             "duration_minutes": 540},
+        ]
+
+        Entries must sum to 1440 minutes. Returns (success, message).
+        """
+        npc = self.get_npc(npc_id)
+        if not npc:
+            return False, f"NPC '{npc_id}' not found"
+
+        if not entries:
+            return False, "Schedule must have at least one entry"
+
+        total = sum(e.get("duration_minutes", 0) for e in entries)
+        if abs(total - MINUTES_PER_DAY) > 1:
+            return False, (
+                f"Schedule entries must sum to {MINUTES_PER_DAY} minutes, "
+                f"got {total}"
+            )
+
+        schedule = []
+        for i, e in enumerate(entries):
+            if not e.get("activity"):
+                return False, f"Entry {i} missing 'activity'"
+            if not e.get("duration_minutes"):
+                return False, f"Entry {i} missing 'duration_minutes'"
+            schedule.append(ScheduleEntry(
+                slot=f"custom_{i}",
+                activity=e["activity"],
+                location=e.get("location", ""),
+                priority=e.get("priority", 5),
+                target_x=e.get("target_x"),
+                target_z=e.get("target_z"),
+                duration_minutes=e["duration_minutes"],
+            ))
+
+        npc.daily_schedule = schedule
+        npc.schedule_index = 0
+        npc.action_start_minutes = self._current_minutes
+        npc.has_custom_schedule = True
+        logger.info(
+            "%s: custom schedule assigned (%d entries)", npc.name, len(schedule),
+        )
+        return True, f"Custom schedule assigned to {npc.name}"
+
+    def clear_custom_schedule(self, npc_id: str) -> tuple[bool, str]:
+        """Remove a custom schedule, reverting to template-based scheduling."""
+        npc = self.get_npc(npc_id)
+        if not npc:
+            return False, f"NPC '{npc_id}' not found"
+
+        npc.has_custom_schedule = False
+        _force_template_schedule(npc, npc.schedule_day)
+        npc.schedule_index = 0
+        npc.action_start_minutes = self._current_minutes
+        logger.info("%s: custom schedule cleared, reverted to template", npc.name)
+        return True, f"Custom schedule cleared for {npc.name}"
 
     def get_npcs_near(self, x: int, z: int, radius: int = 5) -> list[NPC]:
         """Get NPCs within Manhattan distance of a point."""

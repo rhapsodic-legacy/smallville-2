@@ -181,6 +181,7 @@ async def initiate_conversation(
                 age=npc.age,
                 occupation=npc.occupation,
                 personality=npc.personality.to_description(),
+                self_concept=npc.self_concept_summary(),
                 backstory=npc.backstory,
                 other_name=other.name,
                 other_occupation=other.occupation,
@@ -234,29 +235,85 @@ async def initiate_conversation(
     return conv
 
 
+def start_player_conversation(
+    npc: NPC,
+    player: NPC,
+    player_message: str,
+) -> Conversation:
+    """Start (or reuse) a conversation initiated by the player.
+
+    Unlike initiate_conversation, this skips the NPC-greeting LLM call —
+    the NPC responds directly to the player's first message via a
+    subsequent call to continue_conversation. One LLM call per round,
+    not two. Critical for responsiveness: the greeting call uses Gemma's
+    thinking mode (1024 tokens, ~25s) and is unnecessary when the
+    player has already opened the conversation with their own line.
+
+    Returns the Conversation (new or existing-not-finished).
+    """
+    key = frozenset({player.npc_id, npc.npc_id})
+    existing = _active_conversations.get(key)
+    if existing and not existing.finished:
+        existing.add_exchange(player.npc_id, player.name, player_message)
+        return existing
+
+    conv = Conversation(npc_a_id=player.npc_id, npc_b_id=npc.npc_id)
+    conv.add_exchange(player.npc_id, player.name, player_message)
+    _active_conversations[key] = conv
+
+    # Set conversation state on the NPC so other systems don't
+    # pull them away (post-convo dispatch, tier promotion, etc.).
+    npc.conversation_partner = player.npc_id
+    player.conversation_partner = npc.npc_id
+    npc.activity = ActivityState.TALKING
+    npc.current_action_description = f"talking to {player.name}"
+    # Stop any in-flight schedule walk. Without this, an NPC who was
+    # mid-path when the player opened chat would keep walking during
+    # the LLM call and could leave interaction range before the reply
+    # even arrives — the proximity check then closes the chat and the
+    # player never sees a response to their first message.
+    npc.current_path = []
+    npc.path_index = 0
+    # Player's activity is driven by input — do not force TALKING.
+
+    logger.debug("%s opened conversation with %s", player.name, npc.name)
+    return conv
+
+
 async def continue_conversation(
     npc: NPC,
     other: NPC,
     llm: LLMProvider,
     memory_manager: object | None = None,
+    allow_auto_end: bool = True,
+    max_exchanges: int | None = None,
 ) -> bool:
     """
     Generate the next exchange in an active conversation.
 
     The responder is `npc`, responding to the last thing `other` said.
     Returns False if the conversation should end.
+
+    Args:
+        allow_auto_end: If False, suppress the random end-after-exchange
+            roll. Player chats pass False so the conversation doesn't
+            randomly end while the player is actively engaging — only
+            explicit close, walking out of range, or max_exchanges ends it.
+        max_exchanges: Override the default exchange cap. Player chats
+            pass a higher value so a single chat window stays usable.
     """
     from core.npc.llm_client import format_prompt
     from core.npc.cognition.tiers import get_tier_config
 
+    cap = max_exchanges if max_exchanges is not None else MAX_EXCHANGES
     key = frozenset({npc.npc_id, other.npc_id})
     conv = _active_conversations.get(key)
     if conv is None or conv.finished:
         return False
 
     # Check if we've hit the exchange limit
-    if len(conv.exchanges) >= MAX_EXCHANGES:
-        await end_conversation(npc, other)
+    if len(conv.exchanges) >= cap:
+        await end_conversation(npc, other, memory_manager=memory_manager)
         return False
 
     config = get_tier_config(npc.cognition_tier)
@@ -280,6 +337,7 @@ async def continue_conversation(
                 age=npc.age,
                 occupation=npc.occupation,
                 personality=npc.personality.to_description(),
+                self_concept=npc.self_concept_summary(),
                 other_name=other.name,
                 other_occupation=other.occupation,
                 other_message=last_message,
@@ -300,25 +358,109 @@ async def continue_conversation(
 
     conv.add_exchange(npc.npc_id, npc.name, message)
 
-    # Random chance to end after each exchange (increases with count)
-    end_chance = len(conv.exchanges) / (MAX_EXCHANGES + 2)
-    if npc._rng.random() < end_chance:
-        await end_conversation(npc, other)
-        return False
+    if allow_auto_end:
+        # Random chance to end after each exchange (increases with count)
+        end_chance = len(conv.exchanges) / (cap + 2)
+        if npc._rng.random() < end_chance:
+            await end_conversation(npc, other, memory_manager=memory_manager)
+            return False
 
     return True
+
+
+def _conversation_sentiment_deltas(
+    npc: NPC, other: NPC, exchange_count: int,
+) -> dict[str, float]:
+    """Compute sentiment changes from a conversation using heuristics.
+
+    Trust: grows with every conversation (people who talk build trust).
+    Affection: grows slightly per exchange (time spent = bonding).
+    Resonance: boost if shared occupation or overlapping skills.
+    Respect: small boost — you respect someone who takes time to talk.
+    """
+    deltas: dict[str, float] = {}
+
+    # Trust: base +2, +0.5 per exchange beyond the first
+    deltas["trust"] = 2.0 + max(0, exchange_count - 1) * 0.5
+
+    # Affection: +1 base, +0.3 per exchange
+    deltas["affection"] = 1.0 + exchange_count * 0.3
+
+    # Respect: small flat boost
+    deltas["respect"] = 1.0
+
+    # Resonance: shared occupation = strong, overlapping skills = moderate
+    if npc.occupation == other.occupation:
+        deltas["resonance"] = 5.0
+    else:
+        shared_skills = set(npc.skills.keys()) & set(other.skills.keys())
+        if shared_skills:
+            deltas["resonance"] = len(shared_skills) * 1.5
+
+    # --- Negative signals (personality clashes) ---
+    # Large agreeableness gap → friction (blunt vs cooperative)
+    agree_gap = abs(npc.personality.agreeableness - other.personality.agreeableness)
+    if agree_gap > 0.5:
+        deltas["affection"] -= agree_gap * 1.5  # up to -1.5
+
+    # High neuroticism on either side → trust erosion
+    max_neuroticism = max(npc.personality.neuroticism, other.personality.neuroticism)
+    if max_neuroticism > 0.7:
+        deltas["trust"] -= (max_neuroticism - 0.5) * 1.0  # up to -0.5
+
+    # Very different openness → slight respect penalty (can't relate)
+    open_gap = abs(npc.personality.openness - other.personality.openness)
+    if open_gap > 0.6:
+        deltas["respect"] -= open_gap * 0.5  # up to -0.5
+
+    return deltas
 
 
 async def end_conversation(
     npc: NPC,
     other: NPC,
     current_game_minutes: float = 0,
+    memory_manager: object | None = None,
 ) -> None:
-    """End an active conversation between two NPCs."""
+    """End an active conversation and store it in both NPCs' memory."""
     key = frozenset({npc.npc_id, other.npc_id})
     conv = _active_conversations.get(key)
     if conv:
         conv.finished = True
+        exchange_count = len(conv.exchanges)
+
+        # Store conversation in memory for both participants
+        if memory_manager is not None and conv.exchanges:
+            try:
+                await memory_manager.record_conversation(
+                    npc_a_id=npc.npc_id,
+                    npc_b_id=other.npc_id,
+                    npc_a_name=npc.name,
+                    npc_b_name=other.name,
+                    exchanges=[
+                        {"speaker": e.speaker_name, "message": e.message}
+                        for e in conv.exchanges
+                    ],
+                    game_time=current_game_minutes,
+                    location_x=int(npc.x),
+                    location_z=int(npc.z),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to record conversation %s↔%s: %s",
+                    npc.name, other.name, e,
+                )
+
+            # Update sentiment for both participants
+            if memory_manager.sentiment is not None and exchange_count > 0:
+                deltas = _conversation_sentiment_deltas(
+                    npc, other, exchange_count,
+                )
+                for dim, delta in deltas.items():
+                    memory_manager.sentiment.modify_mutual(
+                        npc.npc_id, other.npc_id, dim, delta,
+                        game_time=current_game_minutes,
+                    )
 
     npc.conversation_partner = None
     other.conversation_partner = None

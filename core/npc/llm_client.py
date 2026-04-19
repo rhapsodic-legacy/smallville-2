@@ -195,12 +195,53 @@ class RateLimiter:
 # ---------- Provider interface ----------
 
 class LLMProvider(ABC):
-    """Abstract interface for LLM providers."""
+    """Abstract interface for LLM providers.
+
+    Providers carry a `ThinkingProfile` that controls how deeply the
+    LLM deliberates and how many tokens it's allowed per call. The
+    profile is a knob users expose in the UI ("Fast / Balanced / Deep")
+    and the architecture is layered so that future code can override
+    it per-NPC via `set_npc_profile` for large-town performance:
+    a handful of hero NPCs on DEEP, the crowd on FAST or deterministic.
+
+    Concrete providers are expected to consult the profile in
+    `complete()` — either by calling `_resolve_profile(npc_id)` or by
+    reading `self.profile` directly. Providers that can't honour
+    thinking mode (e.g. the mock provider) ignore it harmlessly.
+    """
+
+    def __init__(self) -> None:
+        from core.npc.cognition.thinking import BALANCED, ThinkingProfile
+        self.profile: ThinkingProfile = BALANCED
+        self._npc_profiles: dict[str, ThinkingProfile] = {}
+
+    def set_profile(self, profile) -> None:
+        """Set the default thinking profile for all calls."""
+        self.profile = profile
+
+    def set_npc_profile(self, npc_id: str, profile) -> None:
+        """Override the thinking profile for a specific NPC.
+
+        Lets large towns mix qualities: call this with DEEP for the
+        story-critical NPCs and leave the rest on the global default
+        (which may itself be FAST for performance).
+        """
+        self._npc_profiles[npc_id] = profile
+
+    def clear_npc_profile(self, npc_id: str) -> None:
+        self._npc_profiles.pop(npc_id, None)
+
+    def _resolve_profile(self, npc_id: str | None):
+        """Return the profile that applies to this call."""
+        if npc_id and npc_id in self._npc_profiles:
+            return self._npc_profiles[npc_id]
+        return self.profile
 
     @abstractmethod
     async def complete(self, system: str, messages: list[dict[str, str]],
                        max_tokens: int = 300, temperature: float = 0.7,
-                       purpose: str = "general") -> str:
+                       purpose: str = "general",
+                       npc_id: str | None = None) -> str:
         """Send a completion request and return the text response."""
         ...
 
@@ -221,6 +262,7 @@ class ClaudeProvider(LLMProvider):
         overseer_model: str | None = None,
         max_calls_per_minute: int = 50,
     ):
+        super().__init__()
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.npc_model = npc_model or self.NPC_MODEL
         self.overseer_model = overseer_model or self.OVERSEER_MODEL
@@ -248,6 +290,7 @@ class ClaudeProvider(LLMProvider):
         temperature: float = 0.7,
         purpose: str = "general",
         use_overseer_model: bool = False,
+        npc_id: str | None = None,
     ) -> str:
         """Call Claude API and return the text response."""
         # Check cache first
@@ -304,6 +347,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "You are {name}, a {age}-year-old {occupation} living in Smallville.\n"
         "{backstory}\n\n"
         "Personality: {personality}\n"
+        "{self_concept}\n"
         "Current goals: {goals}\n"
         "Current state — Health: {health}, Energy: {energy}, Hunger: {hunger}\n"
         "Gold: {gold}\n"
@@ -325,6 +369,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
     "conversation_initiate": (
         "You are {name}, a {age}-year-old {occupation} in Smallville.\n"
         "Personality: {personality}\n"
+        "{self_concept}\n"
         "{backstory}\n\n"
         "You have encountered {other_name} ({other_occupation}).\n"
         "{relationship_context}\n"
@@ -335,7 +380,8 @@ PROMPT_TEMPLATES: dict[str, str] = {
 
     "conversation_respond": (
         "You are {name}, a {age}-year-old {occupation} in Smallville.\n"
-        "Personality: {personality}\n\n"
+        "Personality: {personality}\n"
+        "{self_concept}\n\n"
         "You are talking with {other_name} ({other_occupation}).\n"
         "{relationship_context}\n"
         "{other_name} said: \"{other_message}\"\n\n"
@@ -375,6 +421,34 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "Activity states: idle, working, eating, sleeping, talking, gathering\n"
         "Be specific to your occupation and personality. "
         "Reference the objects available at this location where relevant."
+    ),
+
+    "replan_schedule": (
+        "You are {name}, a {age}-year-old {occupation} in Smallville.\n"
+        "Personality: {personality}\n"
+        "Current goals: {goals}\n\n"
+        "It is currently {time}. Your remaining schedule for today:\n"
+        "{remaining_schedule}\n\n"
+        "Recent events:\n{recent_perceptions}\n\n"
+        "Recent reflections:\n{recent_reflections}\n\n"
+        "People you care about:\n{relationship_summary}\n\n"
+        "Based on what you've seen, heard, and reflected on, should you "
+        "change your remaining schedule? If yes, output a new schedule "
+        "for the REST of today (same format: one line per activity with "
+        "time, activity, location). If no changes needed, respond with: "
+        "NO_CHANGE"
+    ),
+
+    "conversation_extract_facts": (
+        "Here is a conversation between {npc_a_name} and {npc_b_name}:\n"
+        "{conversation}\n\n"
+        "List any important facts revealed in this conversation.\n"
+        "Format each fact as: subject | predicate | object\n"
+        "Examples: Bob | is_hungry | true\n"
+        "Martha | wants_to_visit | the market\n"
+        "The bridge | needs_repair | true\n\n"
+        "Only list facts that are clearly stated or strongly implied.\n"
+        "If no important facts, respond with: NO_FACTS"
     ),
 }
 

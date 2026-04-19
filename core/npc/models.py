@@ -33,6 +33,12 @@ class Direction(Enum):
     WEST = "west"
 
 
+BIG_FIVE_TRAITS: tuple[str, ...] = (
+    "openness", "conscientiousness", "extraversion",
+    "agreeableness", "neuroticism",
+)
+
+
 @dataclass
 class PersonalityTraits:
     """Big Five personality dimensions, each 0.0–1.0."""
@@ -67,6 +73,40 @@ class PersonalityTraits:
             "agreeableness": self.agreeableness,
             "neuroticism": self.neuroticism,
         }
+
+    def copy(self) -> "PersonalityTraits":
+        return PersonalityTraits(**self.to_dict())
+
+    def mutate(self, trait: str, delta: float) -> float:
+        """Nudge a single Big-5 trait and clamp to [0, 1].
+
+        Returns the new trait value. Silently ignores unknown traits
+        so callers can pass LLM-derived keys without crashing.
+        """
+        if trait not in BIG_FIVE_TRAITS:
+            return 0.0
+        value = max(0.0, min(1.0, getattr(self, trait) + delta))
+        setattr(self, trait, value)
+        return value
+
+    def apply_deltas(self, deltas: dict[str, float]) -> None:
+        """Apply a {trait: delta} dict in one shot."""
+        for trait, delta in deltas.items():
+            self.mutate(trait, delta)
+
+    def nudge_toward(
+        self, baseline: "PersonalityTraits", rate: float,
+    ) -> None:
+        """Drift every trait back toward the baseline by `rate` of the gap.
+
+        rate=0.0 means no decay; rate=1.0 snaps back instantly. A tiny
+        per-day rate (~0.02) gives bounded drift without erasing it.
+        """
+        for trait in BIG_FIVE_TRAITS:
+            cur = getattr(self, trait)
+            base = getattr(baseline, trait)
+            new = cur + (base - cur) * rate
+            setattr(self, trait, max(0.0, min(1.0, new)))
 
 
 @dataclass
@@ -118,6 +158,21 @@ class NPC:
     backstory: str
     occupation: str
 
+    # --- Personality evolution ---
+    # spawn_baseline is the Big-5 vector at creation — personality can
+    # drift from it due to emotional reflections, but decays back
+    # slowly so drift is bounded. Populated lazily by the manager.
+    spawn_baseline: PersonalityTraits | None = None
+
+    # --- Self-concept ---
+    # Identity beliefs the NPC holds about themselves. Keys are
+    # namespaced strings: "role:king", "enemy_of:bran_1",
+    # "helped:town", "skill:master_smith". Values are confidence
+    # 0.0–1.0. Populated by reflection on dialogue claims and by
+    # direct authoring. The planner and conversation prompts read
+    # from here so the NPC actually acts on new identities.
+    self_concept: dict[str, float] = field(default_factory=dict)
+
     # --- Physical state ---
     x: float = 0.0
     z: float = 0.0
@@ -147,6 +202,8 @@ class NPC:
     schedule_day: int = 0  # which game day this schedule was generated for
     schedule_index: int = 0  # current position in daily_schedule
     action_start_minutes: float = 0.0  # game-minutes when current action started
+    has_custom_schedule: bool = False  # True = loop custom schedule, don't regenerate
+    last_replan_minutes: float = 0.0   # game-minutes when last mid-day replan happened
 
     # --- Resources ---
     gold: int = 0
@@ -218,11 +275,16 @@ class NPC:
     def needs_new_schedule(self, current_day: int) -> bool:
         """Check if this NPC needs a new schedule.
 
-        Duration-based model: only regenerate when the schedule list is
-        empty (exhausted). Day-based regeneration is handled by
-        _advance_npc_action when the last entry expires.
+        Duration-based model: regenerate when the schedule list is
+        empty (exhausted) OR when the day has advanced past the one
+        this schedule was generated for. The day-change check is
+        critical — without it, an NPC whose schedule got bloated by
+        replans can stay on day-1's (now-stale) schedule forever,
+        never resetting. With it, every dawn starts fresh.
         """
-        return not self.daily_schedule
+        if not self.daily_schedule:
+            return True
+        return getattr(self, "schedule_day", -1) != current_day
 
     def get_current_schedule_entry(self, slot: str) -> ScheduleEntry | None:
         """Get the schedule entry for the given time slot."""
@@ -230,6 +292,69 @@ class NPC:
             if entry.slot == slot:
                 return entry
         return None
+
+    # ---------- Self-concept helpers ----------
+
+    _SELF_CONCEPT_CONFIDENCE_FLOOR: float = 0.05
+
+    def apply_self_concept_delta(
+        self, key: str, delta: float,
+    ) -> float:
+        """Nudge a self-concept belief's confidence and clamp to [0, 1].
+
+        Below a small floor the belief is removed entirely so the dict
+        stays tidy. Returns the new confidence (0.0 if removed).
+        """
+        current = self.self_concept.get(key, 0.0)
+        new = max(0.0, min(1.0, current + delta))
+        if new <= self._SELF_CONCEPT_CONFIDENCE_FLOOR:
+            self.self_concept.pop(key, None)
+            return 0.0
+        self.self_concept[key] = new
+        return new
+
+    def self_concept_summary(self) -> str:
+        """Natural-language line describing self-concept for LLM prompts.
+
+        Returns the empty string when the NPC has no beliefs — callers
+        can then drop the line cleanly from the prompt. Keys use a
+        simple "prefix:target" convention; if the prefix is unknown
+        we fall back to a generic phrasing so new claim types work
+        without any prompt changes.
+        """
+        if not self.self_concept:
+            return ""
+
+        phrase_map = {
+            "role": "a {target}",
+            "enemy_of": "an enemy of {target}",
+            "friend_of": "a friend of {target}",
+            "rival_of": "a rival of {target}",
+            "helped": "someone who helped {target}",
+            "saved": "someone who saved {target}",
+            "betrayed": "someone who was betrayed by {target}",
+            "skill": "{target}",
+            "reputation": "{target}",
+        }
+
+        phrases: list[str] = []
+        # Sort by confidence desc so the strongest beliefs lead.
+        items = sorted(
+            self.self_concept.items(), key=lambda kv: kv[1], reverse=True,
+        )
+        for key, confidence in items[:4]:
+            prefix, _, target = key.partition(":")
+            target = target or key
+            template = phrase_map.get(prefix, "{target}")
+            phrase = template.format(target=target.replace("_", " "))
+            if confidence >= 0.7:
+                phrases.append(phrase)
+            elif confidence >= 0.4:
+                phrases.append(f"perhaps {phrase}")
+            else:
+                phrases.append(f"wondering if you are {phrase}")
+
+        return "You see yourself as: " + "; ".join(phrases) + "."
 
     def summary_for_prompt(self) -> str:
         """Compact NPC summary for inclusion in LLM prompts."""
@@ -276,6 +401,11 @@ class NPC:
             **self.to_dict(),
             "age": self.age,
             "personality": self.personality.to_dict(),
+            "spawn_baseline": (
+                self.spawn_baseline.to_dict()
+                if self.spawn_baseline else None
+            ),
+            "self_concept": dict(self.self_concept),
             "backstory": self.backstory,
             "home_x": self.home_x,
             "home_z": self.home_z,

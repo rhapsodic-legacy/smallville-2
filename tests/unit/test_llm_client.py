@@ -1,5 +1,7 @@
 """Tests for the LLM client — mock provider, cost tracking, prompt templates."""
 
+import asyncio
+
 import pytest
 from core.npc.llm_client import (
     MockProvider, CostTracker, RateLimiter,
@@ -8,35 +10,39 @@ from core.npc.llm_client import (
 
 
 class TestMockProvider:
-    @pytest.mark.asyncio
-    async def test_returns_default_daily_plan(self):
-        provider = MockProvider()
-        result = await provider.complete(
-            system="test", messages=[{"role": "user", "content": "test"}],
-            purpose="daily_plan",
-        )
-        assert "Wake up" in result
+    def test_returns_default_daily_plan(self):
+        async def _run():
+            provider = MockProvider()
+            result = await provider.complete(
+                system="test", messages=[{"role": "user", "content": "test"}],
+                purpose="daily_plan",
+            )
+            assert "Wake up" in result
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_returns_custom_response(self):
-        provider = MockProvider(responses={"greeting": "Hello there!"})
-        result = await provider.complete(
-            system="test", messages=[], purpose="greeting",
-        )
-        assert result == "Hello there!"
+    def test_returns_custom_response(self):
+        async def _run():
+            provider = MockProvider(responses={"greeting": "Hello there!"})
+            result = await provider.complete(
+                system="test", messages=[], purpose="greeting",
+            )
+            assert result == "Hello there!"
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_logs_calls(self):
-        provider = MockProvider()
-        await provider.complete(system="sys", messages=[], purpose="test")
-        assert len(provider.call_log) == 1
-        assert provider.call_log[0]["purpose"] == "test"
+    def test_logs_calls(self):
+        async def _run():
+            provider = MockProvider()
+            await provider.complete(system="sys", messages=[], purpose="test")
+            assert len(provider.call_log) == 1
+            assert provider.call_log[0]["purpose"] == "test"
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_unknown_purpose_returns_acknowledged(self):
-        provider = MockProvider()
-        result = await provider.complete(system="", messages=[], purpose="unknown")
-        assert result == "Acknowledged."
+    def test_unknown_purpose_returns_acknowledged(self):
+        async def _run():
+            provider = MockProvider()
+            result = await provider.complete(system="", messages=[], purpose="unknown")
+            assert result == "Acknowledged."
+        asyncio.new_event_loop().run_until_complete(_run())
 
 
 class TestCostTracker:
@@ -82,6 +88,7 @@ class TestPromptTemplates:
             "daily_plan",
             name="Thorin", age=45, occupation="blacksmith",
             backstory="A veteran smith.", personality="gruff, honest",
+            self_concept="",
             goals="Master the forge", health="100%", energy="80%",
             hunger="10%", gold=150, day=1,
             relationship_summary="No notable relationships yet.",

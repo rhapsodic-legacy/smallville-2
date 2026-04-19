@@ -134,6 +134,12 @@ async def generate_daily_schedule(
 
     npc.daily_schedule = schedule
     npc.schedule_day = current_day
+    # Fresh schedule → fresh cursor. Without these resets, a new day's
+    # schedule picks up mid-way through the old one's index, so the
+    # NPC skips breakfast/work and never reaches their night "walk
+    # home and sleep" entry — producing NPCs visibly wandering at 2 AM.
+    npc.schedule_index = 0
+    npc.action_start_minutes = 0.0
 
     logger.debug(
         "%s generated schedule for day %d (%d entries, tier %d)",
@@ -159,6 +165,7 @@ async def _llm_schedule(
             occupation=npc.occupation,
             backstory=npc.backstory,
             personality=npc.personality.to_description(),
+            self_concept=npc.self_concept_summary(),
             goals="; ".join(npc.long_term_goals[:3]),
             health=f"{npc.health:.0%}",
             energy=f"{npc.energy:.0%}",
@@ -176,7 +183,11 @@ async def _llm_schedule(
             purpose="daily_plan",
         )
 
-        return _parse_llm_schedule(response)
+        # Pass the occupation template as the parser's fallback so that
+        # a low-quality Gemma response (e.g. truncated or prose-only)
+        # still produces a coherent occupation-appropriate schedule
+        # instead of the generic labourer default.
+        return _parse_llm_schedule(response, fallback=_template_schedule(npc))
 
     except Exception as e:
         logger.warning(
@@ -186,14 +197,30 @@ async def _llm_schedule(
         return _template_schedule(npc)
 
 
-def _parse_llm_schedule(response: str) -> list[ScheduleEntry]:
-    """
-    Parse LLM schedule response into ScheduleEntry list.
+_SENTINEL = object()
 
-    Falls back to template-style entries if parsing fails.
-    Maps time ranges to schedule slots.
+
+def _parse_llm_schedule(
+    response: str,
+    fallback: list[ScheduleEntry] | None | object = _SENTINEL,
+) -> list[ScheduleEntry]:
     """
-    entries: list[ScheduleEntry] = []
+    Parse an LLM schedule response into a ScheduleEntry list.
+
+    Only lines with an extractable time (e.g. "7:00 AM", "14:00") are
+    accepted as activities. Lines without a time — titles like
+    "Day 33: A Schedule for Seren", section headers like
+    "Focus: ...", markdown table headers like
+    "| Time Range | Activity | ... |", and rationale commentary —
+    are silently skipped.
+
+    Fallback semantics:
+    - omitted:    use DEFAULT_SCHEDULE_FALLBACK when too few entries
+    - a template: use that template when too few entries
+    - None:       NO fallback — return the (possibly empty) raw parse
+                  as-is. Used by replan to avoid appending a full-day
+                  template to an already in-progress schedule.
+    """
     slot_map = {
         range(5, 8): "early_morning",
         range(8, 12): "morning",
@@ -203,41 +230,117 @@ def _parse_llm_schedule(response: str) -> list[ScheduleEntry]:
         range(0, 5): "night",
     }
 
-    lines = response.strip().split("\n")
+    entries: list[ScheduleEntry] = []
     assigned_slots: set[str] = set()
 
-    for line in lines:
-        raw = line.strip()
+    for raw_line in response.strip().split("\n"):
+        raw = raw_line.strip()
         if not raw:
             continue
 
-        # Extract hour BEFORE stripping digits (lstrip eats time numbers)
         hour = _extract_hour(raw)
-        # Now strip bullet prefixes like "1. " or "2) "
-        line = raw.lstrip("0123456789.-) ")
-        if hour is not None:
-            slot = _hour_to_slot(hour, slot_map)
-        else:
-            # Assign to first unassigned slot
-            slot = _next_unassigned_slot(assigned_slots)
+        if hour is None:
+            # No time on this line — it's a title, header, separator,
+            # or explanatory prose. Skip silently.
+            continue
 
-        if slot and slot not in assigned_slots:
-            # Strip markdown formatting from LLM output
-            clean = _clean_activity(line)
-            location = _infer_location(clean, slot)
-            entries.append(ScheduleEntry(
-                slot=slot,
-                activity=clean,
-                location=location,
-                priority=5,
-            ))
-            assigned_slots.add(slot)
+        slot = _hour_to_slot(hour, slot_map)
+        if slot in assigned_slots:
+            # Each time slot fills once — later duplicate entries
+            # (e.g. "6:00 PM" and "7:00 PM" both mapping to evening)
+            # are dropped. The template supplies finer granularity
+            # via explicit entries.
+            continue
 
-    # Ensure we have at least sleep
-    if "night" not in assigned_slots:
-        entries.append(ScheduleEntry("night", "sleep at home", "home", 9))
+        activity_text = _extract_activity_from_line(raw)
+        clean = _clean_activity(activity_text)
+        if not clean or clean == "idle":
+            continue
 
-    return entries if entries else DEFAULT_SCHEDULE_FALLBACK[:]
+        location = _infer_location(clean, slot)
+        entries.append(ScheduleEntry(
+            slot=slot,
+            activity=clean,
+            location=location,
+            priority=5,
+        ))
+        assigned_slots.add(slot)
+
+    # Fill missing durations with slot defaults. Must happen BEFORE
+    # any return path — an entry with duration_minutes <= 0 jams the
+    # action-cycling advancement check (`if entry.duration_minutes <=
+    # 0: continue`) and the NPC gets stuck on it forever.
+    slot_defaults = {
+        "early_morning": 60,
+        "morning": 300,
+        "afternoon": 300,
+        "evening": 240,
+        "night": 540,
+    }
+    for entry in entries:
+        if entry.duration_minutes <= 0:
+            entry.duration_minutes = slot_defaults.get(entry.slot, 120)
+
+    # Sanity gate: if parsing yielded too little to form a coherent
+    # day, drop back to the occupation template rather than fabricate
+    # a half-empty schedule that will leave the NPC idle. Callers who
+    # pass fallback=None (e.g. replan) want the raw parse even if
+    # sparse, and will handle the "too few entries" case themselves.
+    if len(entries) < 3:
+        if fallback is None:
+            return entries
+        if fallback is _SENTINEL:
+            return list(DEFAULT_SCHEDULE_FALLBACK)
+        return list(fallback)
+
+    # Ensure the day ends at home asleep — NPCs must always wind
+    # down to home. A "22:00 socialise at tavern" line assigned to
+    # the night slot would otherwise mask the missing home entry.
+    # Be strict: the LAST entry must be a home-location sleep entry.
+    _append_sleep_entry_if_missing(entries)
+
+    return entries
+
+
+def _append_sleep_entry_if_missing(entries: list[ScheduleEntry]) -> None:
+    """Guarantee the schedule's final entry is sleep-at-home.
+
+    Mutates the list in place. If the last entry already goes home,
+    no-op. Otherwise appends a 540-minute sleep entry.
+    """
+    last = entries[-1] if entries else None
+    if last and last.location == "home" and (
+        "sleep" in last.activity.lower() or "rest" in last.activity.lower()
+    ):
+        return
+    entries.append(ScheduleEntry(
+        "night", "walk home and sleep", "home", 9,
+        duration_minutes=540,
+    ))
+
+
+def _extract_activity_from_line(line: str) -> str:
+    """Extract the activity portion from a schedule line.
+
+    Handles several formats:
+      "7:00 AM - 8:00 AM: Wake up and eat"    → "Wake up and eat"
+      "**7:00 AM - 8:00 AM:** Wake up, at home" → "Wake up, at home"
+      "| 06:00 | Wake up | Home | notes |"   → "Wake up"
+      "1. 6:00 AM Wake up"                   → "6:00 AM Wake up" (time stripped in clean)
+
+    Markdown table rows take the second pipe-separated cell (the
+    Activity column by convention). All other formats are returned
+    as-is and _clean_activity removes the time prefix.
+    """
+    stripped = line.strip()
+    # Markdown table row — extract activity column (second cell).
+    if stripped.startswith("|"):
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) >= 2:
+            return cells[1]
+        return stripped
+    # Strip bullet numbering / prefixes.
+    return stripped.lstrip("0123456789.-) ")
 
 
 def _clean_activity(text: str) -> str:
@@ -341,14 +444,6 @@ def _hour_to_slot(hour: int, slot_map: dict) -> str:
     return "morning"
 
 
-def _next_unassigned_slot(assigned: set[str]) -> str | None:
-    all_slots = ["early_morning", "morning", "afternoon", "evening", "night"]
-    for slot in all_slots:
-        if slot not in assigned:
-            return slot
-    return None
-
-
 def _template_schedule(npc: NPC) -> list[ScheduleEntry]:
     """Generate a schedule from occupation templates with per-NPC variation."""
     rng = npc._rng
@@ -364,6 +459,28 @@ def _template_schedule(npc: NPC) -> list[ScheduleEntry]:
         )
         for e in base
     ]
+
+    # Stagger wake/sleep times: offset first entry by -10 to +10 minutes
+    # and compensate on the sleep entry. This spreads departures over ~20 min.
+    wake_offset = rng.uniform(-10, 10)  # minutes
+    if schedule:
+        schedule[0] = ScheduleEntry(
+            slot=schedule[0].slot,
+            activity=schedule[0].activity,
+            location=schedule[0].location,
+            priority=schedule[0].priority,
+            duration_minutes=max(30, schedule[0].duration_minutes + wake_offset),
+        )
+        # Compensate on the sleep entry so total stays at 1440
+        if len(schedule) >= 2:
+            last = schedule[-1]
+            schedule[-1] = ScheduleEntry(
+                slot=last.slot,
+                activity=last.activity,
+                location=last.location,
+                priority=last.priority,
+                duration_minutes=max(60, last.duration_minutes - wake_offset),
+            )
 
     # Slight randomisation: occasionally swap evening activity
     if rng.random() < 0.3:
@@ -418,12 +535,23 @@ def resolve_schedule_location(
         return (npc.work_x, npc.work_z)
 
     if target == "town_square":
-        # Find the town hall or church — the civic heart of town
+        # Find the town hall or church — the civic heart of town.
         for b in buildings:
             if b.building_type in ("town_hall", "church"):
                 return (b.door_x, b.door_z)
+        # No civic building: pick the building whose door is closest
+        # to the geographic centroid of all buildings. This produces a
+        # stable, sensible "centre of town" fallback instead of
+        # arbitrary buildings[0] — which could be at the map edge and
+        # would funnel every NPC to a corner.
         if buildings:
-            return (buildings[0].door_x, buildings[0].door_z)
+            cx = sum(b.door_x for b in buildings) / len(buildings)
+            cz = sum(b.door_z for b in buildings) / len(buildings)
+            central = min(
+                buildings,
+                key=lambda b: (b.door_x - cx) ** 2 + (b.door_z - cz) ** 2,
+            )
+            return (central.door_x, central.door_z)
         return (npc.home_x, npc.home_z)
 
     if target == "outskirts":
@@ -489,3 +617,127 @@ async def decide_reaction(
 
     except Exception:
         return "continue_current"
+
+
+# ---------- Mid-day replanning ----------
+
+# Replan intervals per tier (game minutes). None = never replan.
+REPLAN_INTERVALS: dict[int, float | None] = {
+    1: 60.0,     # Tier 1: every 60 game-minutes (~50 seconds real)
+    2: 120.0,    # Tier 2: every 120 game-minutes (~100 seconds real)
+    3: None,     # Tier 3: never (template schedules)
+    4: None,     # Tier 4: frozen
+}
+
+
+def should_replan(npc: NPC, current_minutes: float) -> bool:
+    """Check whether an NPC is due for a mid-day replan."""
+    if npc.has_custom_schedule:
+        return False
+    interval = REPLAN_INTERVALS.get(npc.cognition_tier)
+    if interval is None:
+        return False
+    return (current_minutes - npc.last_replan_minutes) >= interval
+
+
+async def replan_schedule(
+    npc: NPC,
+    llm: LLMProvider,
+    current_minutes: float,
+    recent_perceptions: list[str] | None = None,
+    recent_reflections: list[str] | None = None,
+    relationship_summary: str = "",
+) -> bool:
+    """
+    Mid-day schedule replanning for Tier 1-2 NPCs.
+
+    Sends the LLM the remaining schedule plus recent context, and
+    lets it modify the remaining entries. Returns True if the schedule
+    was actually changed.
+    """
+    from core.npc.llm_client import format_prompt
+
+    if not npc.daily_schedule or npc.schedule_index >= len(npc.daily_schedule):
+        return False
+
+    # Build remaining schedule text
+    remaining = npc.daily_schedule[npc.schedule_index:]
+    schedule_text = "\n".join(
+        f"- {e.activity} at {e.location} ({e.duration_minutes:.0f} min)"
+        for e in remaining
+    )
+
+    perceptions_text = "\n".join(
+        f"- {p}" for p in (recent_perceptions or [])[-5:]
+    ) or "Nothing notable."
+    reflections_text = "\n".join(
+        f"- {r}" for r in (recent_reflections or [])[-3:]
+    ) or "No recent reflections."
+
+    # Calculate current time for the prompt
+    day_minutes = current_minutes % 1440
+    hours = int(day_minutes // 60)
+    mins = int(day_minutes % 60)
+    time_str = f"{hours:02d}:{mins:02d}"
+
+    try:
+        prompt = format_prompt(
+            "replan_schedule",
+            name=npc.name,
+            age=npc.age,
+            occupation=npc.occupation,
+            personality=npc.personality.to_description(),
+            goals="; ".join(npc.long_term_goals[:3]) or "live a good life",
+            time=time_str,
+            remaining_schedule=schedule_text,
+            recent_perceptions=perceptions_text,
+            recent_reflections=reflections_text,
+            relationship_summary=relationship_summary or "No notable relationships.",
+        )
+
+        response = await llm.complete(
+            system="You are a medieval NPC re-evaluating your daily plan.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.7,
+            purpose="daily_plan",
+        )
+
+        response = response.strip()
+        if "NO_CHANGE" in response:
+            npc.last_replan_minutes = current_minutes
+            return False
+
+        # Parse the new remaining schedule. Crucially, we do NOT pass
+        # a fallback template here — replan is for tweaking the tail
+        # of an existing schedule, and defaulting to a full-day
+        # template would APPEND a whole new day's worth of entries to
+        # what's already there. Over many replans this bloats the
+        # schedule (80+ entries observed after ~40 game days) and
+        # NPCs never reach the end to regenerate. Prefer no-op.
+        new_entries = _parse_llm_schedule(response, fallback=None)
+        if not new_entries or len(new_entries) < 2:
+            npc.last_replan_minutes = current_minutes
+            return False
+
+        # Guard against the LLM returning more entries than makes
+        # sense for the remaining portion of the day. A replan at
+        # noon shouldn't generate 10 new activities.
+        remaining_count = len(npc.daily_schedule) - npc.schedule_index
+        if len(new_entries) > remaining_count + 2:
+            new_entries = new_entries[: remaining_count + 2]
+
+        # Replace remaining schedule entries (keep completed ones)
+        npc.daily_schedule = npc.daily_schedule[:npc.schedule_index] + new_entries
+        npc.last_replan_minutes = current_minutes
+
+        logger.info(
+            "%s replanned schedule: %d new entries from index %d",
+            npc.name, len(new_entries), npc.schedule_index,
+        )
+        return True
+
+    except Exception as e:
+        logger.warning("Replan failed for %s: %s", npc.name, e)
+        npc.last_replan_minutes = current_minutes
+        return False
