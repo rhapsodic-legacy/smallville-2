@@ -80,17 +80,45 @@ tests/          — unit, integration, simulation tests
 - Never commit .env or API keys
 
 ## Running
-- **Always start the server** at the beginning of every session: `python3 server/main.py`
+- **Server is not auto-started.** Start `python3 server/main.py` only
+  when the browser client is actually needed this session. Before any
+  Gemma-heavy sim, grep for straggler server processes from prior
+  sessions (`ps aux | grep server/main`) — they steal Ollama
+  throughput. See auto-memory "Server lifecycle".
 - Server runs at http://localhost:8002
 ```bash
 # Install dependencies
 pip install -e ".[dev]"
 
-# Start server
+# Start server (only when browser client needed)
 python server/main.py
 
 # Open browser to http://localhost:8002
 ```
+
+## Deferred — run when hardware allows
+
+The bridge-objector diagnostic is the next concrete experiment. It's a
+logging-only sim (no pass/fail) that tests whether a weighted-
+participation gate + an NPC carrying `opposes:repair_bridge = 0.9`
+produces real emergent behaviour under non-deterministic Gemma. Phase
+J of Memory v2 (persona snapshot) is parked until we've read those
+logs. On the current Mac, Gemma-e2b produces ~1 sim day per 30
+wall-minutes at 10 NPCs — so 30 days takes ~15 hours.
+
+```bash
+# Kill any straggler server first (frees Gemma throughput)
+ps aux | grep server/main | grep -v grep
+
+# Then run the diagnostic
+python3 tests/simulation/diagnostic_bridge_objector.py --days=30
+```
+
+After the run, read the daily log for: does Jasper voice opposition in
+dialogue, does the bridge goal succeed or fail around him, how does
+sentiment toward him shift across cycles. Those signals decide
+whether Phase J re-opens. Full rationale in MEMORY_V2_ROADMAP.md under
+"Emergent-behaviour pivot".
 
 ## Reference Projects
 - **Stanford Generative Agents:** ./generative_agents/ (cloned for reference)
