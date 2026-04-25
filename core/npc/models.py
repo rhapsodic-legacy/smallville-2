@@ -197,6 +197,13 @@ class NPC:
     long_term_goals: list[str] = field(default_factory=list)
     short_term_goals: list[str] = field(default_factory=list)
 
+    # Derived from self_concept via goal_mapper. Keyed by goal text
+    # (matches an entry in long_term_goals). Each value carries the
+    # source self-concept key plus the action_ids and tags the planner
+    # should bias toward while this goal is active. Populated by
+    # `sync_npc_goals()`; hand-authored goals have no entry here.
+    goal_affinities: dict[str, Any] = field(default_factory=dict)
+
     # --- Schedule (Stanford style: duration-based action list) ---
     daily_schedule: list[ScheduleEntry] = field(default_factory=list)
     schedule_day: int = 0  # which game day this schedule was generated for
@@ -333,8 +340,23 @@ class NPC:
             "helped": "someone who helped {target}",
             "saved": "someone who saved {target}",
             "betrayed": "someone who was betrayed by {target}",
+            # Phase I.4 — goal-completion reinforcement keys. `built:`
+            # is fired by construction goals ("repair the bridge");
+            # `joined:` by communal rituals ("town council").
+            "built": "someone who built the {target}",
+            "joined": "someone who joined the {target}",
             "skill": "{target}",
             "reputation": "{target}",
+            # Phase I.5 — soft identity erosion writes `unreliable:self`
+            # when an NPC's commitments have stagnated long enough
+            # that they start internalising the failure.
+            "unreliable": "someone unreliable",
+            # Agenda stance. Feeds `participation_score` for town goals
+            # AND renders here so conversation prompts know the NPC has
+            # skin in the game — they can actually argue their position
+            # in dialogue instead of silently declining to show up.
+            "opposes": "opposed to {target}",
+            "supports": "a supporter of {target}",
         }
 
         phrases: list[str] = []
@@ -413,6 +435,12 @@ class NPC:
             "work_z": self.work_z,
             "long_term_goals": self.long_term_goals,
             "short_term_goals": self.short_term_goals,
+            "goal_affinities": {
+                text: (
+                    aff.to_dict() if hasattr(aff, "to_dict") else dict(aff)
+                )
+                for text, aff in self.goal_affinities.items()
+            },
             "gold": self.gold,
             "inventory": dict(self.inventory),
             "skills": dict(self.skills),

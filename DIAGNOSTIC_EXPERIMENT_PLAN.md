@@ -232,7 +232,7 @@ Based on Phase 3 results:
 
 ```
 tests/simulation/
-  test_instrumented_sim.py    — The instrumented simulation runner
+  diagnostic_instrumented_sim.py    — The instrumented simulation runner
   analyse_diagnostic.py       — Post-run log analysis and reports
   diagnostic_log.jsonl        — Output: per-tick structured logs
 

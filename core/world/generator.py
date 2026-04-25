@@ -434,34 +434,39 @@ class TownGenerator:
     def _connect_roads(self) -> None:
         """Build roads connecting all building doors to the town centre.
 
-        Uses A* pathfinding around buildings instead of L-shaped stamping
-        so roads never visually pass through or under buildings.
+        Uses A* pathfinding with a 1-tile buffer around buildings so roads
+        never visually clip through building meshes.
         """
         centre = (0, 0)
 
-        # Build a set of all building footprint tiles (walls + interiors)
-        # that roads must route around.
+        # Build a set of all building footprint tiles PLUS a 1-tile buffer
+        # so roads don't route immediately against walls (visual clipping).
         building_tiles: set[tuple[int, int]] = set()
         for b in self.buildings:
-            for dx in range(b.width):
-                for dz in range(b.height):
+            for dx in range(-1, b.width + 1):
+                for dz in range(-1, b.height + 1):
                     building_tiles.add((b.x + dx, b.z + dz))
 
         for building in self.buildings:
             approach_z = building.door_z + 1
+            start = (building.door_x, approach_z)
+            # Unblock the start and goal tiles so A* can always connect.
+            # Also unblock the tile just past the approach for routing room.
+            exempt = {start, centre, (building.door_x, approach_z + 1)}
             path = self._find_road_path(
-                building.door_x, approach_z,
+                start[0], start[1],
                 centre[0], centre[1],
-                building_tiles,
+                building_tiles - exempt,
             )
             if path:
                 for px, pz in path:
                     self._set_road_tile(px, pz)
             else:
-                # Fallback: L-shaped if pathfinding fails (shouldn't happen)
+                # Fallback: L-shaped, but skip tiles on building footprints
                 self._lay_road_fallback(
-                    building.door_x, approach_z,
+                    start[0], start[1],
                     centre[0], centre[1],
+                    building_tiles - exempt,
                 )
 
     def _find_road_path(
@@ -521,17 +526,22 @@ class TownGenerator:
 
         return None
 
-    def _lay_road_fallback(self, x1: int, z1: int, x2: int, z2: int) -> None:
-        """L-shaped fallback if pathfinding fails."""
+    def _lay_road_fallback(
+        self, x1: int, z1: int, x2: int, z2: int,
+        blocked: set[tuple[int, int]] | None = None,
+    ) -> None:
+        """L-shaped fallback if pathfinding fails. Skips blocked tiles."""
         step_x = 1 if x2 >= x1 else -1
         step_z = 1 if z2 >= z1 else -1
         x = x1
         while x != x2:
-            self._set_road_tile(x, z1)
+            if not blocked or (x, z1) not in blocked:
+                self._set_road_tile(x, z1)
             x += step_x
         z = z1
         while z != z2:
-            self._set_road_tile(x2, z)
+            if not blocked or (x2, z) not in blocked:
+                self._set_road_tile(x2, z)
             z += step_z
         self._set_road_tile(x2, z2)
 
@@ -549,12 +559,44 @@ class TownGenerator:
             tile.walkable = True
             self._road_tiles.add((x, z))
 
+    # ---------- Placement Exclusion (layering) ----------
+
+    def _build_exclusion_set(self) -> set[tuple[int, int]]:
+        """Build a set of tiles where resources/decorations must NOT spawn.
+
+        Combines:
+          - Road tiles (from _connect_roads)
+          - Building footprints + 1-tile buffer around each building
+          - Town square area
+        This prevents trees, bushes, etc. from appearing on roads or
+        clipping into buildings.
+        """
+        excluded: set[tuple[int, int]] = set(self._road_tiles)
+
+        # Building footprints + 1-tile buffer
+        for b in self.buildings:
+            for dx in range(-1, b.width + 1):
+                for dz in range(-1, b.height + 1):
+                    excluded.add((b.x + dx, b.z + dz))
+
+        # Town square
+        for x in range(-3, 4):
+            for z in range(-3, 4):
+                excluded.add((x, z))
+
+        return excluded
+
     # ---------- Resource Nodes ----------
 
     def _place_resource_nodes(self) -> None:
-        """Scatter resource nodes (trees, mines, fields) in outskirts."""
+        """Scatter resource nodes (trees, mines, fields) in outskirts.
+
+        Uses the placement exclusion set to avoid roads, building footprints,
+        and buffer zones around buildings.
+        """
         min_x, min_z, max_x, max_z = self.grid.bounds
         resources = self._resource_types_for_economy()
+        excluded = self._build_exclusion_set()
 
         for res_type, count, terrain_pref in resources:
             placed = 0
@@ -563,6 +605,8 @@ class TownGenerator:
                 attempts += 1
                 x = self.rng.randint(min_x + 2, max_x - 2)
                 z = self.rng.randint(min_z + 2, max_z - 2)
+                if (x, z) in excluded:
+                    continue
                 tile = self.grid.get_tile(x, z)
                 if tile is None:
                     continue

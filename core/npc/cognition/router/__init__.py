@@ -88,6 +88,17 @@ def default_importance_scorer(
         "daily_schedule": 0.4,
         "reaction": 0.5,
         "trade_evaluation": 0.3,
+        # Compaction is a maintenance task — a good summary helps,
+        # but the heuristic fallback is adequate. Low base score so
+        # only focus-area NPCs / high-novelty days clear the
+        # auto-mode threshold and get the LLM treatment.
+        "compaction": 0.2,
+        # Self-review defaults to ROUTE_LLM (see policy.py) so this
+        # base only matters when a user flips it to AUTO. Set just
+        # above 0.5 so the typical composite score clears the
+        # threshold at moderate proximity/novelty — the feature's
+        # intent is voice-per-NPC, not "only focus NPCs get one".
+        "self_review": 0.6,
         "craft_choice": 0.2,
         "flee": 0.1,  # must be fast, deterministic preferred
         "gather_choice": 0.1,

@@ -21,6 +21,9 @@ from core.world.generator import TownGenerator, WorldConfig
 from core.npc.manager import NPCManager
 from core.npc.models import ScheduleEntry, ActivityState
 from core.npc.cognition.decompose import decompose_schedule_entry
+from core.npc.llm_client import MockProvider
+from core.memory.manager import MemoryManager
+from core.memory.episodic import EpisodicStore
 from core.time_system.clock import GameClock
 
 TICK_DELTA = 1.0   # real seconds per tick (matches live sim)
@@ -206,30 +209,37 @@ def test_building_objects_populated() -> TestResult:
 
 # ---------- Simulation tests ----------
 
-async def test_never_idle_simulation() -> TestResult:
+def test_never_idle_simulation() -> TestResult:
     """After 300 ticks, most NPCs have active sub-tasks (not generic idle)."""
     cfg = WorldConfig(seed=42, grid_width=60, grid_height=60, population=POPULATION)
     gen = TownGenerator(cfg)
     gen.generate()
-    mgr = NPCManager(gen.grid, gen.buildings, seed=42)
+    llm = MockProvider()
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
+    mgr = NPCManager(gen.grid, gen.buildings, llm=llm, seed=42, memory=memory)
     mgr.spawn_population(POPULATION)
     clock = GameClock()
 
     idle_snapshots = 0
     total_snapshots = 0
 
-    for tick in range(TICKS):
-        await mgr.tick(clock, TICK_DELTA)
-        clock.tick(TICK_DELTA)
+    async def _run():
+        nonlocal idle_snapshots, total_snapshots
+        for tick in range(TICKS):
+            await mgr.tick(clock, TICK_DELTA)
+            clock.tick(TICK_DELTA)
 
-        for npc in mgr.npcs:
-            if npc.activity == ActivityState.WALKING:
-                continue  # walking NPCs don't need sub-tasks
-            total_snapshots += 1
-            if (npc.current_action_description in ("idle", "")
-                    and not npc.current_subtask
-                    and not npc.subtask_queue):
-                idle_snapshots += 1
+            for npc in mgr.npcs:
+                if npc.activity == ActivityState.WALKING:
+                    continue  # walking NPCs don't need sub-tasks
+                total_snapshots += 1
+                if (npc.current_action_description in ("idle", "")
+                        and not npc.current_subtask
+                        and not npc.subtask_queue):
+                    idle_snapshots += 1
+
+    asyncio.new_event_loop().run_until_complete(_run())
 
     idle_pct = (idle_snapshots / max(total_snapshots, 1)) * 100
     # Allow up to 20% idle (transition gaps, slot changes, etc.)
@@ -242,22 +252,29 @@ async def test_never_idle_simulation() -> TestResult:
     )
 
 
-async def test_description_variety_simulation() -> TestResult:
+def test_description_variety_simulation() -> TestResult:
     """Across a full simulation, NPCs produce 15+ unique action descriptions."""
     cfg = WorldConfig(seed=42, grid_width=60, grid_height=60, population=POPULATION)
     gen = TownGenerator(cfg)
     gen.generate()
-    mgr = NPCManager(gen.grid, gen.buildings, seed=42)
+    llm = MockProvider()
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
+    mgr = NPCManager(gen.grid, gen.buildings, llm=llm, seed=42, memory=memory)
     mgr.spawn_population(POPULATION)
     clock = GameClock()
 
     all_descs: set[str] = set()
-    for _ in range(TICKS):
-        await mgr.tick(clock, TICK_DELTA)
-        clock.tick(TICK_DELTA)
-        for npc in mgr.npcs:
-            if npc.current_action_description:
-                all_descs.add(npc.current_action_description)
+
+    async def _run():
+        for _ in range(TICKS):
+            await mgr.tick(clock, TICK_DELTA)
+            clock.tick(TICK_DELTA)
+            for npc in mgr.npcs:
+                if npc.current_action_description:
+                    all_descs.add(npc.current_action_description)
+
+    asyncio.new_event_loop().run_until_complete(_run())
 
     # Filter out generic ones
     subtask_descs = {d for d in all_descs
@@ -273,12 +290,15 @@ async def test_description_variety_simulation() -> TestResult:
     )
 
 
-async def test_subtask_timer_advances() -> TestResult:
+def test_subtask_timer_advances() -> TestResult:
     """Sub-task timers decrease over time and sub-tasks rotate."""
     cfg = WorldConfig(seed=42, grid_width=60, grid_height=60, population=POPULATION)
     gen = TownGenerator(cfg)
     gen.generate()
-    mgr = NPCManager(gen.grid, gen.buildings, seed=42)
+    llm = MockProvider()
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
+    mgr = NPCManager(gen.grid, gen.buildings, llm=llm, seed=42, memory=memory)
     mgr.spawn_population(POPULATION)
     clock = GameClock()
 
@@ -286,16 +306,20 @@ async def test_subtask_timer_advances() -> TestResult:
     subtask_changes = 0
     prev_subtasks: dict[str, str | None] = {}
 
-    for _ in range(TICKS):
-        await mgr.tick(clock, TICK_DELTA)
-        clock.tick(TICK_DELTA)
+    async def _run():
+        nonlocal subtask_changes
+        for _ in range(TICKS):
+            await mgr.tick(clock, TICK_DELTA)
+            clock.tick(TICK_DELTA)
 
-        for npc in mgr.npcs:
-            curr = npc.current_subtask.description if npc.current_subtask else None
-            prev = prev_subtasks.get(npc.npc_id)
-            if prev is not None and curr != prev:
-                subtask_changes += 1
-            prev_subtasks[npc.npc_id] = curr
+            for npc in mgr.npcs:
+                curr = npc.current_subtask.description if npc.current_subtask else None
+                prev = prev_subtasks.get(npc.npc_id)
+                if prev is not None and curr != prev:
+                    subtask_changes += 1
+                prev_subtasks[npc.npc_id] = curr
+
+    asyncio.new_event_loop().run_until_complete(_run())
 
     # Expect at least some sub-task rotations
     passed = subtask_changes >= 5
@@ -306,12 +330,15 @@ async def test_subtask_timer_advances() -> TestResult:
     )
 
 
-async def test_no_idle_synchronisation() -> TestResult:
+def test_no_idle_synchronisation() -> TestResult:
     """NPCs should not all go idle on the same tick (synchronisation bug)."""
     cfg = WorldConfig(seed=42, grid_width=60, grid_height=60, population=POPULATION)
     gen = TownGenerator(cfg)
     gen.generate()
-    mgr = NPCManager(gen.grid, gen.buildings, seed=42)
+    llm = MockProvider()
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
+    mgr = NPCManager(gen.grid, gen.buildings, llm=llm, seed=42, memory=memory)
     mgr.spawn_population(POPULATION)
     clock = GameClock()
 
@@ -319,23 +346,27 @@ async def test_no_idle_synchronisation() -> TestResult:
     sync_events = 0
     prev_idle: dict[str, bool] = {}
 
-    for tick in range(TICKS):
-        await mgr.tick(clock, TICK_DELTA)
-        clock.tick(TICK_DELTA)
+    async def _run():
+        nonlocal sync_events
+        for tick in range(TICKS):
+            await mgr.tick(clock, TICK_DELTA)
+            clock.tick(TICK_DELTA)
 
-        # Count NPCs that became idle THIS tick (weren't idle before)
-        new_idle_count = 0
-        for npc in mgr.npcs:
-            is_idle = (npc.activity != ActivityState.WALKING
-                       and not npc.current_subtask
-                       and not npc.subtask_queue)
-            was_idle = prev_idle.get(npc.npc_id, False)
-            if is_idle and not was_idle:
-                new_idle_count += 1
-            prev_idle[npc.npc_id] = is_idle
+            # Count NPCs that became idle THIS tick (weren't idle before)
+            new_idle_count = 0
+            for npc in mgr.npcs:
+                is_idle = (npc.activity != ActivityState.WALKING
+                           and not npc.current_subtask
+                           and not npc.subtask_queue)
+                was_idle = prev_idle.get(npc.npc_id, False)
+                if is_idle and not was_idle:
+                    new_idle_count += 1
+                prev_idle[npc.npc_id] = is_idle
 
-        if new_idle_count >= sync_threshold:
-            sync_events += 1
+            if new_idle_count >= sync_threshold:
+                sync_events += 1
+
+    asyncio.new_event_loop().run_until_complete(_run())
 
     passed = sync_events == 0
     return TestResult(
@@ -358,20 +389,16 @@ def main() -> int:
     ]
 
     # Simulation tests
-    sim_results = asyncio.run(_run_sim_tests())
+    sim_results = [
+        test_never_idle_simulation(),
+        test_description_variety_simulation(),
+        test_subtask_timer_advances(),
+        test_no_idle_synchronisation(),
+    ]
 
     all_results = unit_results + sim_results
     success = _print_report(all_results)
     return 0 if success else 1
-
-
-async def _run_sim_tests() -> list[TestResult]:
-    return [
-        await test_never_idle_simulation(),
-        await test_description_variety_simulation(),
-        await test_subtask_timer_advances(),
-        await test_no_idle_synchronisation(),
-    ]
 
 
 if __name__ == "__main__":

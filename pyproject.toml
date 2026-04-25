@@ -38,7 +38,12 @@ testpaths = ["tests"]
 markers = [
     "integration: tests that hit real LLM API (deselect with -m 'not integration')",
     "simulation: long-running headless simulation tests (deselect with -m 'not simulation')",
+    "narrative: opt-in narrative sim tests — real Gemma LLM, slow, hand-run when introducing or changing NPC reasoning features. Select with `pytest -m narrative`; deselected from default runs.",
 ]
+# Default: deselect narrative tests so routine `pytest` runs stay fast.
+# Override with `pytest -m narrative` (or `-m 'narrative or simulation'`
+# etc.) when you want them included.
+addopts = "-m 'not narrative'"
 asyncio_mode = "auto"
 
 [tool.ruff]

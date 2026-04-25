@@ -6,8 +6,8 @@ sync scores, action variety, and outlier detection. Produces rich
 diagnostics showing whether NPCs maintain human-like daily routines
 or degrade into robotic loops.
 
-Run: python3 tests/simulation/test_60day_stability.py
-Multi: python3 tests/simulation/test_60day_stability.py --multi --runs=5
+Run: python3 tests/simulation/diagnostic_60day_stability.py
+Multi: python3 tests/simulation/diagnostic_60day_stability.py --multi --runs=5
 """
 
 from __future__ import annotations

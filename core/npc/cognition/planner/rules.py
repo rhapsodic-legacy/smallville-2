@@ -47,7 +47,7 @@ class PlannedAction:
     breakdown: dict[str, float] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def to_schedule_entry(self, slot: str) -> Any:
+    def to_schedule_entry(self, slot: str, duration_minutes: float = 120.0) -> Any:
         """Convert to a ScheduleEntry for compatibility with the plan system."""
         from core.npc.models import ScheduleEntry
         return ScheduleEntry(
@@ -57,6 +57,7 @@ class PlannedAction:
             priority=max(1, min(10, int(self.utility_score * 2))),
             target_x=self.target_x,
             target_z=self.target_z,
+            duration_minutes=duration_minutes,
         )
 
 

@@ -6,7 +6,7 @@ Runs 10 NPCs for 14 simulated days with:
   - Structured JSON-lines logging of every tick and event
   - Post-run analysis via analyse_diagnostic.py
 
-Run: python3 tests/simulation/test_instrumented_sim.py
+Run: python3 tests/simulation/diagnostic_instrumented_sim.py
 """
 
 from __future__ import annotations

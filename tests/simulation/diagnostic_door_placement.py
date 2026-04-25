@@ -8,7 +8,7 @@ footprint, not outside it. This means:
   - The approach tile (door_z + 1) is also walkable
   - The door 3D position is on or very near the building's south wall
 
-Run: python3 tests/simulation/test_door_placement.py
+Run: python3 tests/simulation/diagnostic_door_placement.py
 """
 
 from __future__ import annotations

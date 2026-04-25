@@ -1,5 +1,6 @@
 """Tests for the context-aware MockProvider."""
 
+import asyncio
 import pytest
 
 from core.npc.mock_provider import (
@@ -65,43 +66,47 @@ class TestCycling:
     def provider(self):
         return MockProvider()
 
-    @pytest.mark.asyncio
-    async def test_conversation_cycles(self, provider):
+    def test_conversation_cycles(self, provider):
         """Same purpose should yield different responses on consecutive calls."""
-        results = []
-        for _ in range(3):
-            r = await provider.complete("system", [{"role": "user", "content": "Hi"}],
-                                        purpose="conversation")
-            results.append(r)
-        # At least 2 of 3 should differ (cycling through neutral pool)
-        assert len(set(results)) >= 2
+        async def _run():
+            results = []
+            for _ in range(3):
+                r = await provider.complete("system", [{"role": "user", "content": "Hi"}],
+                                            purpose="conversation")
+                results.append(r)
+            # At least 2 of 3 should differ (cycling through neutral pool)
+            assert len(set(results)) >= 2
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_reflection_cycles(self, provider):
-        results = set()
-        for _ in range(5):
-            r = await provider.complete("system", [{"role": "user", "content": "reflect"}],
-                                        purpose="reflection")
-            results.add(r)
-        assert len(results) >= 3, "Reflections should vary"
+    def test_reflection_cycles(self, provider):
+        async def _run():
+            results = set()
+            for _ in range(5):
+                r = await provider.complete("system", [{"role": "user", "content": "reflect"}],
+                                            purpose="reflection")
+                results.add(r)
+            assert len(results) >= 3, "Reflections should vary"
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_importance_varies(self, provider):
-        results = set()
-        for _ in range(6):
-            r = await provider.complete("system", [{"role": "user", "content": "event"}],
-                                        purpose="importance")
-            results.add(r)
-        assert len(results) >= 2, "Importance scores should vary"
+    def test_importance_varies(self, provider):
+        async def _run():
+            results = set()
+            for _ in range(6):
+                r = await provider.complete("system", [{"role": "user", "content": "event"}],
+                                            purpose="importance")
+                results.add(r)
+            assert len(results) >= 2, "Importance scores should vary"
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_reaction_varies(self, provider):
-        results = set()
-        for _ in range(8):
-            r = await provider.complete("system", [{"role": "user", "content": "obs"}],
-                                        purpose="reaction")
-            results.add(r)
-        assert len(results) >= 2
+    def test_reaction_varies(self, provider):
+        async def _run():
+            results = set()
+            for _ in range(8):
+                r = await provider.complete("system", [{"role": "user", "content": "obs"}],
+                                            purpose="reaction")
+                results.add(r)
+            assert len(results) >= 2
+        asyncio.new_event_loop().run_until_complete(_run())
 
 
 # ---------- Context-aware responses ----------
@@ -111,136 +116,150 @@ class TestContextAware:
     def provider(self):
         return MockProvider()
 
-    @pytest.mark.asyncio
-    async def test_negative_sentiment_conversation(self, provider):
+    def test_negative_sentiment_conversation(self, provider):
         """Prompt with hostile signals should pick from negative pool."""
-        prompt = "You are talking with Bob. disposition: hostile, trust: -30"
-        r = await provider.complete(prompt, [{"role": "user", "content": ""}],
-                                    purpose="conversation")
-        from core.npc.mock_provider import _CONVERSATION_NEGATIVE
-        assert r in _CONVERSATION_NEGATIVE
+        async def _run():
+            prompt = "You are talking with Bob. disposition: hostile, trust: -30"
+            r = await provider.complete(prompt, [{"role": "user", "content": ""}],
+                                        purpose="conversation")
+            from core.npc.mock_provider import _CONVERSATION_NEGATIVE
+            assert r in _CONVERSATION_NEGATIVE
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_positive_sentiment_conversation(self, provider):
-        prompt = "You are talking with Alice. disposition: friendly, trust: 40"
-        r = await provider.complete(prompt, [{"role": "user", "content": ""}],
-                                    purpose="conversation")
-        from core.npc.mock_provider import _CONVERSATION_POSITIVE
-        assert r in _CONVERSATION_POSITIVE
+    def test_positive_sentiment_conversation(self, provider):
+        async def _run():
+            prompt = "You are talking with Alice. disposition: friendly, trust: 40"
+            r = await provider.complete(prompt, [{"role": "user", "content": ""}],
+                                        purpose="conversation")
+            from core.npc.mock_provider import _CONVERSATION_POSITIVE
+            assert r in _CONVERSATION_POSITIVE
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_neutral_conversation(self, provider):
-        prompt = "You are talking with someone."
-        r = await provider.complete(prompt, [{"role": "user", "content": ""}],
-                                    purpose="conversation")
-        from core.npc.mock_provider import _CONVERSATION_NEUTRAL
-        assert r in _CONVERSATION_NEUTRAL
+    def test_neutral_conversation(self, provider):
+        async def _run():
+            prompt = "You are talking with someone."
+            r = await provider.complete(prompt, [{"role": "user", "content": ""}],
+                                        purpose="conversation")
+            from core.npc.mock_provider import _CONVERSATION_NEUTRAL
+            assert r in _CONVERSATION_NEUTRAL
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_help_conversation(self, provider):
-        prompt = "You need help carrying supplies."
-        r = await provider.complete(prompt, [{"role": "user", "content": ""}],
-                                    purpose="conversation")
-        from core.npc.mock_provider import _CONVERSATION_HELP
-        assert r in _CONVERSATION_HELP
+    def test_help_conversation(self, provider):
+        async def _run():
+            prompt = "You need help carrying supplies."
+            r = await provider.complete(prompt, [{"role": "user", "content": ""}],
+                                        purpose="conversation")
+            from core.npc.mock_provider import _CONVERSATION_HELP
+            assert r in _CONVERSATION_HELP
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_farmer_daily_plan(self, provider):
-        prompt = "You are Bob, a farmer in Smallville."
-        r = await provider.complete(prompt, [{"role": "user", "content": ""}],
-                                    purpose="daily_plan")
-        from core.npc.mock_provider import _DAILY_PLANS
-        assert r in _DAILY_PLANS["farmer"]
+    def test_farmer_daily_plan(self, provider):
+        async def _run():
+            prompt = "You are Bob, a farmer in Smallville."
+            r = await provider.complete(prompt, [{"role": "user", "content": ""}],
+                                        purpose="daily_plan")
+            from core.npc.mock_provider import _DAILY_PLANS
+            assert r in _DAILY_PLANS["farmer"]
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_blacksmith_task(self, provider):
-        prompt = "You are a blacksmith at the forge."
-        r = await provider.complete(prompt, [{"role": "user", "content": ""}],
-                                    purpose="task_decomposition")
-        from core.npc.mock_provider import _TASK_DECOMPOSITION
-        assert r in _TASK_DECOMPOSITION["blacksmith"]
+    def test_blacksmith_task(self, provider):
+        async def _run():
+            prompt = "You are a blacksmith at the forge."
+            r = await provider.complete(prompt, [{"role": "user", "content": ""}],
+                                        purpose="task_decomposition")
+            from core.npc.mock_provider import _TASK_DECOMPOSITION
+            assert r in _TASK_DECOMPOSITION["blacksmith"]
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_default_occupation_fallback(self, provider):
-        prompt = "You are a librarian."
-        r = await provider.complete(prompt, [{"role": "user", "content": ""}],
-                                    purpose="daily_plan")
-        from core.npc.mock_provider import _DAILY_PLANS
-        assert r in _DAILY_PLANS["default"]
+    def test_default_occupation_fallback(self, provider):
+        async def _run():
+            prompt = "You are a librarian."
+            r = await provider.complete(prompt, [{"role": "user", "content": ""}],
+                                        purpose="daily_plan")
+            from core.npc.mock_provider import _DAILY_PLANS
+            assert r in _DAILY_PLANS["default"]
+        asyncio.new_event_loop().run_until_complete(_run())
 
 
 # ---------- Legacy overrides ----------
 
 class TestLegacyOverrides:
-    @pytest.mark.asyncio
-    async def test_exact_override(self):
-        provider = MockProvider(responses={"conversation": "Custom response."})
-        r = await provider.complete("sys", [{"role": "user", "content": ""}],
-                                    purpose="conversation")
-        assert r == "Custom response."
+    def test_exact_override(self):
+        async def _run():
+            provider = MockProvider(responses={"conversation": "Custom response."})
+            r = await provider.complete("sys", [{"role": "user", "content": ""}],
+                                        purpose="conversation")
+            assert r == "Custom response."
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_override_does_not_affect_other_purposes(self):
-        provider = MockProvider(responses={"conversation": "Custom."})
-        r = await provider.complete("sys", [{"role": "user", "content": ""}],
-                                    purpose="reflection")
-        assert r != "Custom."
+    def test_override_does_not_affect_other_purposes(self):
+        async def _run():
+            provider = MockProvider(responses={"conversation": "Custom."})
+            r = await provider.complete("sys", [{"role": "user", "content": ""}],
+                                        purpose="reflection")
+            assert r != "Custom."
+        asyncio.new_event_loop().run_until_complete(_run())
 
 
 # ---------- register_responses ----------
 
 class TestRegisterResponses:
-    @pytest.mark.asyncio
-    async def test_custom_pool(self):
-        provider = MockProvider()
-        provider.register_responses("conversation", "neutral", [
-            "Custom neutral 1", "Custom neutral 2",
-        ])
-        r = await provider.complete(
-            "Just a chat.", [{"role": "user", "content": ""}],
-            purpose="conversation",
-        )
-        assert r in ("Custom neutral 1", "Custom neutral 2")
+    def test_custom_pool(self):
+        async def _run():
+            provider = MockProvider()
+            provider.register_responses("conversation", "neutral", [
+                "Custom neutral 1", "Custom neutral 2",
+            ])
+            r = await provider.complete(
+                "Just a chat.", [{"role": "user", "content": ""}],
+                purpose="conversation",
+            )
+            assert r in ("Custom neutral 1", "Custom neutral 2")
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_custom_pool_cycles(self):
-        provider = MockProvider()
-        provider.register_responses("reflection", "default", ["A", "B", "C"])
-        results = []
-        for _ in range(3):
+    def test_custom_pool_cycles(self):
+        async def _run():
+            provider = MockProvider()
+            provider.register_responses("reflection", "default", ["A", "B", "C"])
+            results = []
+            for _ in range(3):
+                r = await provider.complete("sys", [{"role": "user", "content": ""}],
+                                            purpose="reflection")
+                results.append(r)
+            assert results == ["A", "B", "C"]
+        asyncio.new_event_loop().run_until_complete(_run())
+
+    def test_unknown_purpose_fallback(self):
+        async def _run():
+            provider = MockProvider()
             r = await provider.complete("sys", [{"role": "user", "content": ""}],
-                                        purpose="reflection")
-            results.append(r)
-        assert results == ["A", "B", "C"]
-
-    @pytest.mark.asyncio
-    async def test_unknown_purpose_fallback(self):
-        provider = MockProvider()
-        r = await provider.complete("sys", [{"role": "user", "content": ""}],
-                                    purpose="some_new_purpose")
-        assert r == "Acknowledged."
+                                        purpose="some_new_purpose")
+            assert r == "Acknowledged."
+        asyncio.new_event_loop().run_until_complete(_run())
 
 
 # ---------- Call log ----------
 
 class TestCallLog:
-    @pytest.mark.asyncio
-    async def test_calls_logged(self):
-        provider = MockProvider()
-        await provider.complete("sys", [{"role": "user", "content": "hi"}],
-                                purpose="conversation")
-        assert len(provider.call_log) == 1
-        assert provider.call_log[0]["purpose"] == "conversation"
+    def test_calls_logged(self):
+        async def _run():
+            provider = MockProvider()
+            await provider.complete("sys", [{"role": "user", "content": "hi"}],
+                                    purpose="conversation")
+            assert len(provider.call_log) == 1
+            assert provider.call_log[0]["purpose"] == "conversation"
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_all_purposes_return_strings(self):
-        provider = MockProvider()
-        purposes = [
-            "daily_plan", "conversation", "reflection",
-            "reaction", "importance", "task_decomposition",
-        ]
-        for p in purposes:
-            r = await provider.complete("sys", [{"role": "user", "content": ""}],
-                                        purpose=p)
-            assert isinstance(r, str)
-            assert len(r) > 0, f"Empty response for purpose={p}"
+    def test_all_purposes_return_strings(self):
+        async def _run():
+            provider = MockProvider()
+            purposes = [
+                "daily_plan", "conversation", "reflection",
+                "reaction", "importance", "task_decomposition",
+            ]
+            for p in purposes:
+                r = await provider.complete("sys", [{"role": "user", "content": ""}],
+                                            purpose=p)
+                assert isinstance(r, str)
+                assert len(r) > 0, f"Empty response for purpose={p}"
+        asyncio.new_event_loop().run_until_complete(_run())

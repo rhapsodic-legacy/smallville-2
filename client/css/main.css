@@ -433,9 +433,392 @@ body {
 }
 
 /* HUD hint for inspector toggle */
-#hud-memory-hint {
+#hud-controls-hint {
     font-size: 11px;
     color: #556;
-    cursor: pointer;
+    pointer-events: none;
+}
+
+/* Thinking-level dropdown */
+#hud-thinking-row {
+    font-size: 11px;
+    color: #aab;
+    display: flex;
+    align-items: center;
+    gap: 6px;
     pointer-events: auto;
 }
+
+#hud-thinking-row label {
+    color: #8ab4ff;
+}
+
+#hud-thinking-level {
+    background: rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(100, 140, 255, 0.3);
+    color: #e0e0e0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    outline: none;
+    cursor: pointer;
+}
+
+#hud-thinking-level:hover {
+    border-color: rgba(100, 140, 255, 0.6);
+}
+
+/* Town agenda */
+#hud-agenda {
+    background: rgba(0, 0, 0, 0.55);
+    border-left: 3px solid #ffd700;
+    padding: 6px 10px;
+    border-radius: 3px;
+    font-size: 12px;
+    max-width: 340px;
+}
+
+#hud-agenda.hidden {
+    display: none;
+}
+
+.agenda-title {
+    color: #ffd700;
+    font-weight: 600;
+    margin-bottom: 2px;
+}
+
+.agenda-goal {
+    margin-top: 5px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(255, 215, 0, 0.15);
+}
+
+.agenda-goal:first-child {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+}
+
+.agenda-goal-title {
+    color: #e0e0e0;
+}
+
+.agenda-progress {
+    color: #8ab4ff;
+    font-size: 11px;
+}
+
+.agenda-status-active { color: #4aff7a; }
+.agenda-status-proposed { color: #8aaaff; }
+.agenda-status-completed { color: #ffd700; }
+
+/* ======== Player Stats Bars ======== */
+
+#hud-stats {
+    background: rgba(0, 0, 0, 0.6);
+    padding: 6px 12px;
+    border-radius: 4px;
+    backdrop-filter: blur(4px);
+}
+
+.hud-stat-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 3px;
+}
+
+.hud-stat-row:last-child {
+    margin-bottom: 0;
+}
+
+.hud-stat-label {
+    font-size: 10px;
+    color: #8ab4ff;
+    width: 18px;
+    text-align: right;
+}
+
+.hud-stat-bar {
+    flex: 1;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.hud-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.hud-health-fill { background: #44cc44; width: 100%; }
+.hud-energy-fill { background: #4488ff; width: 100%; }
+.hud-hunger-fill { background: #ffaa44; width: 100%; }
+
+/* ======== Minimap ======== */
+
+#minimap {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    border: 1px solid rgba(100, 140, 255, 0.3);
+    border-radius: 4px;
+    opacity: 0.85;
+}
+
+/* ======== Nearby NPC List ======== */
+
+#hud-nearby {
+    background: rgba(0, 0, 0, 0.6);
+    padding: 6px 12px;
+    border-radius: 4px;
+    backdrop-filter: blur(4px);
+    font-size: 12px;
+}
+
+#hud-nearby.hidden {
+    display: none;
+}
+
+.hud-nearby-npc {
+    color: #aab;
+    padding: 2px 0;
+    cursor: default;
+}
+
+.hud-nearby-npc::before {
+    content: "• ";
+    color: #ffd700;
+}
+
+/* Phase E: nearby-NPC row carries an inline memory dot when we have
+   a recent memory_formed event for that NPC. The dot replaces the
+   default bullet visually and colours itself from the memory's
+   category so the colours match the sparkle above the NPC's head. */
+.hud-nearby-npc--has-memory::before {
+    content: "";
+}
+
+.hud-memory-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+    box-shadow: 0 0 4px currentColor;
+}
+
+.hud-nearby-npc--has-memory {
+    color: #d0d6e0;
+}
+
+.notif-memory {
+    background: rgba(40, 20, 60, 0.75);
+    border-left: 3px solid #c77dff;
+}
+
+/* ======== Chat Messages ======== */
+
+.chat-message {
+    padding: 3px 0;
+    line-height: 1.4;
+}
+
+.chat-player strong { color: #ffd700; }
+.chat-npc strong { color: #44aaff; }
+.chat-system { color: #667; font-style: italic; font-size: 12px; }
+
+.chat-thinking {
+    color: #44aaff;
+    font-size: 18px;
+    letter-spacing: 4px;
+    padding: 4px 0;
+}
+.thinking-dots span {
+    animation: thinking-pulse 1.4s infinite ease-in-out;
+    opacity: 0.2;
+}
+.thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+.thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes thinking-pulse {
+    0%, 80%, 100% { opacity: 0.2; }
+    40% { opacity: 1; }
+}
+
+.chat-toast {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.8);
+    color: #ffd700;
+    padding: 8px 16px;
+    border-radius: 4px;
+    font-size: 13px;
+    z-index: 200;
+    animation: fadeIn 0.3s ease-in;
+}
+
+/* ======== Trade Panel ======== */
+
+.trade-panel {
+    position: absolute;
+    bottom: 16px;
+    left: 440px;
+    width: 380px;
+    max-height: 500px;
+    background: rgba(10, 10, 30, 0.92);
+    border: 1px solid rgba(100, 140, 255, 0.3);
+    border-radius: 8px;
+    backdrop-filter: blur(12px);
+    z-index: 90;
+    overflow-y: auto;
+}
+
+.trade-panel.hidden { display: none; }
+
+.trade-content { padding: 12px; }
+
+.trade-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.trade-header h3 {
+    margin: 0;
+    font-size: 14px;
+    color: #ffd700;
+}
+
+.trade-close {
+    cursor: pointer;
+    font-size: 18px;
+    color: #888;
+}
+
+.trade-close:hover { color: #ff6666; }
+
+.trade-inventory h4,
+.trade-section h4 {
+    font-size: 12px;
+    color: #8ab4ff;
+    margin: 8px 0 4px;
+}
+
+.trade-inv-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 8px;
+}
+
+.trade-inv-item {
+    background: rgba(100, 140, 255, 0.12);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: #bbc;
+}
+
+.trade-empty { color: #556; font-size: 12px; }
+
+.trade-item-input {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 6px;
+}
+
+.trade-item-input input {
+    flex: 1;
+    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+    color: #e0e0e0;
+    font-size: 12px;
+    outline: none;
+}
+
+.trade-item-input input[type="number"] { width: 50px; flex: none; }
+
+.trade-item-input button,
+.trade-propose-btn {
+    padding: 4px 10px;
+    background: rgba(100, 140, 255, 0.2);
+    border: 1px solid rgba(100, 140, 255, 0.3);
+    border-radius: 3px;
+    color: #8ab4ff;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.trade-item-input button:hover,
+.trade-propose-btn:hover {
+    background: rgba(100, 140, 255, 0.35);
+}
+
+.trade-propose-btn {
+    width: 100%;
+    margin-top: 10px;
+    padding: 8px;
+    font-size: 13px;
+    background: rgba(255, 215, 0, 0.15);
+    border-color: rgba(255, 215, 0, 0.3);
+    color: #ffd700;
+}
+
+.trade-propose-btn:hover { background: rgba(255, 215, 0, 0.3); }
+
+.trade-list-item {
+    display: inline-block;
+    background: rgba(100, 140, 255, 0.12);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    color: #bbc;
+    margin: 2px 4px 2px 0;
+}
+
+.trade-remove { cursor: pointer; color: #ff6666; margin-left: 4px; }
+
+.trade-gold-row {
+    display: flex;
+    gap: 12px;
+    margin-top: 8px;
+}
+
+.trade-gold-row label {
+    font-size: 12px;
+    color: #aab;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.trade-gold-row input {
+    width: 60px;
+    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+    color: #e0e0e0;
+    font-size: 12px;
+    outline: none;
+}
+
+.trade-status {
+    margin-top: 8px;
+    font-size: 12px;
+    text-align: center;
+    min-height: 18px;
+}
+
+.trade-pending { color: #ffd700; }
+.trade-accepted { color: #44cc44; }
+.trade-rejected { color: #ff6666; }

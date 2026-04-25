@@ -33,6 +33,7 @@ from core.npc.manager import NPCManager
 from core.npc.llm_client import MockProvider
 from core.npc.models import ActivityState
 from core.memory.manager import MemoryManager
+from core.memory.episodic import EpisodicStore
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,8 @@ async def run_simulation(
     config = WorldConfig(population=population, terrain="riverside", seed=seed)
     grid, buildings = generate_world(config)
     llm = MockProvider()
-    memory = MemoryManager(llm=llm)
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
     clock = GameClock()
 
     manager = NPCManager(

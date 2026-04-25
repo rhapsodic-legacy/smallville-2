@@ -80,6 +80,8 @@ tests/          — unit, integration, simulation tests
 - Never commit .env or API keys
 
 ## Running
+- **Always start the server** at the beginning of every session: `python3 server/main.py`
+- Server runs at http://localhost:8002
 ```bash
 # Install dependencies
 pip install -e ".[dev]"
@@ -97,5 +99,12 @@ python server/main.py
 
 ## Tracking
 - **Roadmap:** PROJECT_ROADMAP.md (phases, substeps, status)
+- **Sub-roadmaps** for in-flight (or recently-shipped) feature arcs:
+  - MEMORY_ROADMAP.md — holistic conversation memory (shipped
+    2026-04-20; D.2/D.3 deferred tuning)
+  - MEMORY_V2_ROADMAP.md — next-gen memory: tags, compaction,
+    progress-aware objectives, unified persona snapshot (design
+    phase, not started)
 - Update roadmap status as work completes
-- Read PROJECT_ROADMAP.md first after any interruption to understand current state
+- Read PROJECT_ROADMAP.md first after any interruption to understand current state,
+  then any active sub-roadmap listed in its "Active Sub-Roadmaps" section

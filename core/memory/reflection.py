@@ -17,7 +17,7 @@ import logging
 import random
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.memory.manager import MemoryManager
@@ -66,9 +66,12 @@ INSIGHT_PROMPT = (
 POST_CONVERSATION_PROMPT = (
     "You are {name}, a {occupation} in Smallville.\n"
     "You just finished talking with {other_name}.\n\n"
-    "The conversation:\n{conversation}\n\n"
-    "What did you learn or feel from this conversation? "
-    "Answer in 1 sentence, in first person."
+    "The conversation:\n{conversation}\n"
+    "{outcome_summary}\n"
+    "What conclusion do you draw from this — about {other_name}, "
+    "about yourself, about the town, or about someone who was "
+    "mentioned? Name the specific insight, not just how you felt. "
+    "Answer in 1-2 sentences, in first person."
 )
 
 ACTION_INTENT_PROMPT = (
@@ -203,6 +206,119 @@ async def run_reflection_with_intents(
     return insights, action_intents
 
 
+IMPORTANT_NOTE_PROMPT = (
+    "You are {name}, a {occupation} in Smallville.\n"
+    "You just had this insight after a conversation with {other_name}:\n"
+    "\"{insight}\"\n\n"
+    "Is there a specific fact you should WRITE DOWN and remember "
+    "about this — a concrete detail that, weeks from now, would let "
+    "you explain why something happened? (Example: \"Traveller told "
+    "me on day 12 that Petra is hoarding bread.\")\n\n"
+    "If yes, reply in this exact format — ONE line, concise:\n"
+    "NOTE: <the single factual line>\n"
+    "TAGS: <2-4 short, lowercase, underscore-joined tags, "
+    "space-separated>\n\n"
+    "If the insight is purely emotional, a generic impression, or "
+    "doesn't contain a specific fact worth remembering, reply:\n"
+    "NO_NOTE"
+)
+
+
+async def extract_important_note(
+    npc: "NPC",
+    insight: str,
+    other_name: str,
+    llm: "LLMProvider",
+) -> tuple[str, set[str]] | None:
+    """Phase K.5 — ask the LLM whether a reflection insight contains
+    a surgical fact worth keeping verbatim (with tags) even after
+    Phase H compaction.
+
+    Returns `(note_text, tag_set)` or None when nothing worth noting.
+    Uses the same tier gate as `classify_insight`: only tier-1 NPCs
+    burn LLM budget here; others just skip.
+    """
+    from core.npc.cognition.tiers import get_tier_config
+    from core.memory.episodic import normalise_tags
+
+    config = get_tier_config(npc.cognition_tier)
+    if not config.uses_llm:
+        return None
+    try:
+        prompt = IMPORTANT_NOTE_PROMPT.format(
+            name=npc.name,
+            occupation=npc.occupation,
+            other_name=other_name,
+            insight=insight,
+        )
+        response = await llm.complete(
+            system="You decide which facts an NPC should remember verbatim.",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=120,
+            temperature=0.3,
+            purpose="reflection",
+        )
+    except Exception as e:
+        logger.debug("Important-note extraction failed for %s: %s", npc.name, e)
+        return None
+
+    text = (response or "").strip()
+    if "NO_NOTE" in text.upper():
+        return None
+    note_line = ""
+    tag_line = ""
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.upper().startswith("NOTE:"):
+            note_line = stripped.split(":", 1)[1].strip()
+        elif stripped.upper().startswith("TAGS:"):
+            tag_line = stripped.split(":", 1)[1].strip()
+    if not note_line:
+        return None
+    tag_set = normalise_tags(tag_line)
+    if not tag_set:
+        # Fall back to two words from the note as tags so the note
+        # remains retrievable.
+        import re
+        words = [
+            w.lower() for w in re.findall(r"[A-Za-z]+", note_line)
+            if len(w) > 4
+        ]
+        tag_set = normalise_tags(words[:3])
+    return (note_line, tag_set)
+
+
+def _format_outcome_for_reflection(outcome: Any) -> str:
+    """Render a ConversationOutcome as a short prompt-ready block.
+
+    Returns "" when there's nothing to say; otherwise produces
+    bullet-style lines the reflection prompt can lean on. The
+    generated lines stay first-person-neutral so either participant
+    can consume the same block without pronoun surgery.
+    """
+    if outcome is None:
+        return ""
+    parts: list[str] = []
+    for c in getattr(outcome, "commitments", []):
+        parts.append(
+            f"- {c.speaker} committed to {c.subject.strip().rstrip('.')}."
+        )
+    for a in getattr(outcome, "accusations", []):
+        parts.append(
+            f"- {a.accuser} accused {a.accused} of "
+            f"{a.claim.strip().rstrip('.')}."
+        )
+    for r in getattr(outcome, "relayed_claims", []):
+        subject = r.subject or "someone"
+        parts.append(
+            f"- {r.relayed_by} relayed that {r.cited_source} "
+            f"said {subject} {r.claim.strip().rstrip('.')}."
+        )
+    if not parts:
+        return ""
+    return "Notable outcomes from this conversation:\n" + "\n".join(parts)
+
+
 async def reflect_on_conversation(
     npc: NPC,
     other_name: str,
@@ -210,11 +326,16 @@ async def reflect_on_conversation(
     memory: MemoryManager,
     llm: LLMProvider,
     current_game_time: float,
+    outcome: Any = None,
 ) -> str | None:
     """
     Quick reflection after a conversation ends.
 
-    Generates a single insight about what was discussed/learnt.
+    Generates a single insight about what was discussed/learnt. When
+    a structured `ConversationOutcome` is passed in, the prompt is
+    primed with its contents (commitments, accusations, relayed
+    claims) so the NPC's conclusion actually engages with what
+    happened rather than producing vague "I had a nice chat" lines.
     """
     from core.npc.llm_client import format_prompt
     from core.npc.cognition.tiers import get_tier_config
@@ -228,12 +349,15 @@ async def reflect_on_conversation(
         for e in exchanges
     )
 
+    outcome_summary = _format_outcome_for_reflection(outcome)
+
     try:
         prompt = POST_CONVERSATION_PROMPT.format(
             name=npc.name,
             occupation=npc.occupation,
             other_name=other_name,
             conversation=conversation_text,
+            outcome_summary=outcome_summary,
         )
 
         insight = await llm.complete(

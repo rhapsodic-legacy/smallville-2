@@ -8,6 +8,7 @@
 
 import * as THREE from 'three';
 import { ProceduralAssetProvider } from './procedural_assets.js';
+import { memoryCategoryColour } from './hud.js';
 
 // If the NPC needs to cover more than this distance, teleport instantly.
 const TELEPORT_DISTANCE = 4.0;
@@ -74,6 +75,12 @@ export class NPCRenderer {
 
         for (const [id, mesh] of this.npcMeshes) {
             if (!activeIds.has(id)) {
+                if (mesh.memorySprites) {
+                    for (const s of mesh.memorySprites) {
+                        s.material.dispose();
+                        s.mesh.geometry.dispose();
+                    }
+                }
                 this.npcGroup.remove(mesh.group);
                 this.npcMeshes.delete(id);
                 this.moveStates.delete(id);
@@ -129,6 +136,34 @@ export class NPCRenderer {
                     );
                 } else {
                     mesh.speechBubble.visible = false;
+                }
+            }
+
+            // --- Memory sparkles: rise, pulse, fade ---
+            if (mesh.memorySprites && mesh.memorySprites.length > 0) {
+                for (let i = mesh.memorySprites.length - 1; i >= 0; i--) {
+                    const s = mesh.memorySprites[i];
+                    s.age += deltaTime;
+                    const t = s.age / s.lifetime;
+                    if (t >= 1.0) {
+                        mesh.group.remove(s.mesh);
+                        s.material.dispose();
+                        s.mesh.geometry.dispose();
+                        mesh.memorySprites.splice(i, 1);
+                        continue;
+                    }
+                    // Rise
+                    s.mesh.position.y = s.startY + t * 0.8;
+                    // Slow spin so the icosahedron catches light
+                    s.mesh.rotation.y += deltaTime * 4.0;
+                    s.mesh.rotation.x += deltaTime * 2.0;
+                    // Pulse scale
+                    const pulse = 1.0 + Math.sin(s.age * 14.0) * 0.15;
+                    s.mesh.scale.setScalar(pulse);
+                    // Fade out in the last third
+                    s.material.opacity = t < 0.66
+                        ? 0.95
+                        : 0.95 * (1.0 - (t - 0.66) / 0.34);
                 }
             }
         }
@@ -216,7 +251,10 @@ export class NPCRenderer {
                 }
             }
         } else {
-            // No trail — check for position drift (overlap nudge, etc.)
+            // No trail — the server sent a discrete position update
+            // (player moved via input, overlap nudge, etc.). Keep the
+            // client chasing the latest authoritative position rather
+            // than stalling on a stale waypoint.
             const dx = data.x - existing.x;
             const dz = data.z - existing.z;
             const drift = Math.sqrt(dx * dx + dz * dz);
@@ -225,9 +263,14 @@ export class NPCRenderer {
                 existing.x = data.x;
                 existing.z = data.z;
                 existing.waypoints = [];
-            } else if (drift > 0.1 && existing.waypoints.length === 0) {
-                // Small nudge — walk smoothly to corrected position
-                existing.waypoints.push([data.x, data.z]);
+            } else if (drift > 0.05) {
+                // Replace the queue with the latest server position.
+                // The previous implementation only pushed when the queue
+                // was empty, so continuous WASD input (server updates
+                // every 0.25s) stalled the client behind the avatar —
+                // visibly the player NPC and the interaction ring drifted
+                // far from where the server said the player actually was.
+                existing.waypoints = [[data.x, data.z]];
             }
         }
     }
@@ -326,6 +369,56 @@ export class NPCRenderer {
             activity: data.activity,
             bobPhase: Math.random() * Math.PI * 2,
             speechPulse: 0,
+            memorySprites: [],
+        });
+    }
+
+    /**
+     * Fire a short-lived sparkle above an NPC's head to mark a new
+     * memory forming. Colour shifts by category; size by importance.
+     *
+     * Phase E.2: colour keyed to the memory category (red for
+     * accusations, gold for commitments, green for completed town
+     * events, purple for relayed claims, etc.) via the shared HUD
+     * colour map so sparkle and HUD dots match. Size scales with
+     * importance so high-intensity memories read louder.
+     * Rises ~0.8 units and fades over ~1.6s.
+     *
+     * @param {string} npcId
+     * @param {number} importance — 0-1
+     * @param {string} [category]
+     */
+    flashMemory(npcId, importance, category) {
+        const mesh = this.npcMeshes.get(npcId);
+        if (!mesh) return;
+
+        const palette = memoryCategoryColour(category);
+        const colour = palette.hex;
+        // Base size scales with importance, then a mild bump for
+        // high-importance so accusations/reflections read louder.
+        let scale = 0.09 + Math.min(0.06, importance * 0.07);
+        if (importance >= 0.8) scale *= 1.3;
+
+        // Tiny glyph — a small icosahedron so it reads as a sparkle
+        // rather than the activity bead already floating beside the
+        // NPC. Self-illuminated so it survives night lighting.
+        const geo = new THREE.IcosahedronGeometry(scale, 0);
+        const mat = new THREE.MeshBasicMaterial({
+            color: colour,
+            transparent: true,
+            opacity: 0.95,
+        });
+        const sparkle = new THREE.Mesh(geo, mat);
+        const anim = mesh.animation;
+        sparkle.position.set(0, anim.base_y + 0.55, 0);
+        mesh.group.add(sparkle);
+
+        mesh.memorySprites.push({
+            mesh: sparkle,
+            material: mat,
+            age: 0,
+            lifetime: 1.6,
+            startY: sparkle.position.y,
         });
     }
 

@@ -27,6 +27,7 @@ from core.npc.manager import NPCManager
 from core.npc.models import ActivityState
 from core.npc.llm_client import MockProvider
 from core.memory.manager import MemoryManager
+from core.memory.episodic import EpisodicStore
 from core.time_system.clock import GameClock
 from core.world.generator import WorldConfig, generate_world
 
@@ -79,7 +80,8 @@ def run_diagnostic(days: int = 2, population: int = 7, seed: int = 99):
     config = WorldConfig(population=population, terrain="riverside", seed=seed)
     grid, buildings = generate_world(config)
     llm = MockProvider()
-    memory = MemoryManager(llm=llm)
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
     mgr = NPCManager(
         grid=grid, buildings=buildings, llm=llm,
         seed=seed, memory=memory,
@@ -192,7 +194,7 @@ def run_diagnostic(days: int = 2, population: int = 7, seed: int = 99):
                                 and positions[i] != positions[i - 1]):
                             d.reversal_count += 1
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.new_event_loop().run_until_complete(_run())
 
     return diagnostics, buildings, grid
 

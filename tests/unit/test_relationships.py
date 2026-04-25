@@ -506,13 +506,16 @@ class TestRelationshipContext:
     def test_sentiment_appears_in_context(self, tracker, factions):
         from core.memory.structured import StructuredMemory
         from core.memory.manager import MemoryManager
+        from core.memory.episodic import EpisodicStore
 
         structured = StructuredMemory()
         structured.initialise()
+        episodic = EpisodicStore(fallback_only=True)
         mgr = MemoryManager(
             structured=structured,
             sentiment=tracker,
             factions=factions,
+            episodic=episodic,
         )
 
         tracker.modify("npc_a", "npc_b", "trust", 30)
@@ -522,13 +525,16 @@ class TestRelationshipContext:
     def test_faction_appears_in_context(self, tracker, factions):
         from core.memory.structured import StructuredMemory
         from core.memory.manager import MemoryManager
+        from core.memory.episodic import EpisodicStore
 
         structured = StructuredMemory()
         structured.initialise()
+        episodic = EpisodicStore(fallback_only=True)
         mgr = MemoryManager(
             structured=structured,
             sentiment=tracker,
             factions=factions,
+            episodic=episodic,
         )
 
         factions.create_faction("g1", "Iron Brotherhood")
@@ -541,13 +547,16 @@ class TestRelationshipContext:
     def test_rival_factions_in_context(self, tracker, factions):
         from core.memory.structured import StructuredMemory
         from core.memory.manager import MemoryManager
+        from core.memory.episodic import EpisodicStore
 
         structured = StructuredMemory()
         structured.initialise()
+        episodic = EpisodicStore(fallback_only=True)
         mgr = MemoryManager(
             structured=structured,
             sentiment=tracker,
             factions=factions,
+            episodic=episodic,
         )
 
         factions.create_faction("g1", "Guild A")
@@ -562,13 +571,16 @@ class TestRelationshipContext:
     def test_default_context_no_relationship(self, tracker, factions):
         from core.memory.structured import StructuredMemory
         from core.memory.manager import MemoryManager
+        from core.memory.episodic import EpisodicStore
 
         structured = StructuredMemory()
         structured.initialise()
+        episodic = EpisodicStore(fallback_only=True)
         mgr = MemoryManager(
             structured=structured,
             sentiment=tracker,
             factions=factions,
+            episodic=episodic,
         )
 
         ctx = mgr.get_relationship_context("npc_a", "Unknown", other_id="npc_x")

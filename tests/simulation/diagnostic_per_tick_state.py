@@ -8,7 +8,7 @@ Outputs a tick-by-tick log showing:
 - Overlap counts
 - Departure/arrival events
 
-Run: python3 tests/simulation/test_diagnostic.py
+Run: python3 tests/simulation/diagnostic_per_tick_state.py
 """
 
 from __future__ import annotations

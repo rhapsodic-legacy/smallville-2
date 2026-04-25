@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import random
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -39,11 +40,26 @@ class ConversationExchange:
 
 @dataclass
 class Conversation:
-    """An active or completed conversation between two NPCs."""
+    """An active or completed conversation between two NPCs.
+
+    `conv_id` is a process-unique id used to tag per-turn memories so
+    the consolidation sweep (see MemoryManager.consolidate_conversation_turns)
+    can find and remove them once the final summary is written.
+    """
     npc_a_id: str
     npc_b_id: str
     exchanges: list[ConversationExchange] = field(default_factory=list)
     finished: bool = False
+    conv_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    # Count of exchanges already persisted as per-turn memories, so
+    # the server's after-reply hook can write only the new ones.
+    persisted_exchange_count: int = 0
+    # Set to True once `_persist_finished_conversations` has made a
+    # persistence attempt (successful OR failed). Without this flag,
+    # a `record_conversation` exception would re-crash every tick
+    # because the conversation stays in `_active_conversations`.
+    # `clear_finished_conversations` also removes persisted convos.
+    persisted: bool = False
 
     def add_exchange(self, speaker_id: str, speaker_name: str, message: str) -> None:
         self.exchanges.append(ConversationExchange(
@@ -60,6 +76,7 @@ class Conversation:
                 for e in self.exchanges
             ],
             "finished": self.finished,
+            "conv_id": self.conv_id,
         }
 
 
@@ -81,9 +98,58 @@ def get_active_conversations() -> list[Conversation]:
     return [c for c in _active_conversations.values() if not c.finished]
 
 
+# How many trailing exchanges to pass into the response prompt as
+# short-term conversational context. Five is enough to hold the
+# shape of a back-and-forth without bloating the prompt. The
+# newest exchange — the one being responded to — is excluded
+# because it's rendered separately as `other_message`.
+_RECENT_HISTORY_TURNS = 5
+
+
+def _format_recent_history(
+    exchanges: list["ConversationExchange"],
+) -> str:
+    """Render recent turns as a "Recent conversation so far" block.
+
+    Returns the empty string when there aren't enough prior turns to
+    bother with (a brand-new chat has only the line we're replying
+    to). Formats with speaker names so the LLM can follow who said
+    what, and keeps each line terse so the block stays compact.
+    """
+    if not exchanges or len(exchanges) < 2:
+        return ""
+    # Drop the final exchange — that's the message being replied to
+    # and is rendered separately in the prompt. Take the N before it.
+    tail = exchanges[:-1][-_RECENT_HISTORY_TURNS:]
+    if not tail:
+        return ""
+    lines = [
+        f"{e.speaker_name}: \"{e.message}\""
+        for e in tail
+    ]
+    return (
+        "Recent conversation so far:\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
+
+
 def clear_finished_conversations() -> int:
-    """Remove finished conversations. Returns count removed."""
-    to_remove = [k for k, v in _active_conversations.items() if v.finished]
+    """Remove finished conversations that have been persisted (or
+    whose persistence was attempted and swallowed). Returns the
+    number removed.
+
+    A conversation stays in `_active_conversations` if
+    `finished=True` but `persisted=False` — which only happens
+    between the moment `end_conversation` flips `finished` and the
+    NEXT cognition tick's persistence step. Once a persistence
+    attempt runs (success or logged failure), `persisted=True` is
+    set and this cleanup removes it.
+    """
+    to_remove = [
+        k for k, v in _active_conversations.items()
+        if v.finished and v.persisted
+    ]
     for k in to_remove:
         del _active_conversations[k]
     return len(to_remove)
@@ -144,6 +210,9 @@ async def initiate_conversation(
     memory_manager: object | None = None,
     grid: object | None = None,
     all_npcs: list | None = None,
+    town_agenda_summary: str = "",
+    unresolved_matters_summary: str = "",
+    shared_agenda_summary: str = "",
 ) -> Conversation | None:
     """
     Start a conversation between two NPCs.
@@ -182,6 +251,9 @@ async def initiate_conversation(
                 occupation=npc.occupation,
                 personality=npc.personality.to_description(),
                 self_concept=npc.self_concept_summary(),
+                town_agenda=town_agenda_summary,
+                shared_agenda=shared_agenda_summary,
+                unresolved_matters=unresolved_matters_summary,
                 backstory=npc.backstory,
                 other_name=other.name,
                 other_occupation=other.occupation,
@@ -287,6 +359,10 @@ async def continue_conversation(
     memory_manager: object | None = None,
     allow_auto_end: bool = True,
     max_exchanges: int | None = None,
+    town_agenda_summary: str = "",
+    unresolved_matters_summary: str = "",
+    shared_agenda_summary: str = "",
+    force_llm: bool = False,
 ) -> bool:
     """
     Generate the next exchange in an active conversation.
@@ -301,6 +377,17 @@ async def continue_conversation(
             explicit close, walking out of range, or max_exchanges ends it.
         max_exchanges: Override the default exchange cap. Player chats
             pass a higher value so a single chat window stays usable.
+        force_llm: Require the LLM path regardless of this NPC's
+            cognition tier, and SURFACE any LLM exception (don't
+            silently fall back to a canned string). Set by player
+            chats — if the player is typing at an NPC, a mock
+            response like "Indeed, quite so." is a worse experience
+            than an honest error; the whole point of player-NPC
+            interaction is that the NPC actually engages with what
+            was said. A tier-update race (NPC still at tier 3 when
+            focus hasn't caught up to the player's latest step)
+            used to drop player chats onto the canned-fallback path
+            and produce the infamous "Indeed, quite so." reply.
     """
     from core.npc.llm_client import format_prompt
     from core.npc.cognition.tiers import get_tier_config
@@ -319,31 +406,45 @@ async def continue_conversation(
     config = get_tier_config(npc.cognition_tier)
     last_message = conv.exchanges[-1].message if conv.exchanges else ""
 
-    if config.uses_llm:
+    # Build a compact history block covering the last few exchanges
+    # before the line the NPC is replying to. Without this, the LLM
+    # only ever sees the single latest utterance and loses the thread
+    # of a multi-turn conversation — NPCs appeared to forget what was
+    # just discussed, because they literally had no prior context in
+    # the prompt.
+    recent_history = _format_recent_history(conv.exchanges)
+
+    use_llm = config.uses_llm or force_llm
+    if use_llm:
+        # Pull relationship context if available (cheap; errors
+        # here are cosmetic and shouldn't abort the chat).
+        relationship_context = ""
+        if memory_manager is not None:
+            try:
+                relationship_context = memory_manager.get_relationship_context(
+                    npc.npc_id, other.name, other_id=other.npc_id,
+                )
+            except Exception:
+                pass
+
+        prompt = format_prompt(
+            "conversation_respond",
+            name=npc.name,
+            age=npc.age,
+            occupation=npc.occupation,
+            personality=npc.personality.to_description(),
+            self_concept=npc.self_concept_summary(),
+            town_agenda=town_agenda_summary,
+            shared_agenda=shared_agenda_summary,
+            unresolved_matters=unresolved_matters_summary,
+            other_name=other.name,
+            other_occupation=other.occupation,
+            other_message=last_message,
+            recent_history=recent_history,
+            relationship_context=relationship_context or "You know them as a fellow townsperson.",
+        )
+
         try:
-            # Pull relationship context if available
-            relationship_context = ""
-            if memory_manager is not None:
-                try:
-                    relationship_context = memory_manager.get_relationship_context(
-                        npc.npc_id, other.name, other_id=other.npc_id,
-                    )
-                except Exception:
-                    pass
-
-            prompt = format_prompt(
-                "conversation_respond",
-                name=npc.name,
-                age=npc.age,
-                occupation=npc.occupation,
-                personality=npc.personality.to_description(),
-                self_concept=npc.self_concept_summary(),
-                other_name=other.name,
-                other_occupation=other.occupation,
-                other_message=last_message,
-                relationship_context=relationship_context or "You know them as a fellow townsperson.",
-            )
-
             message = await llm.complete(
                 system="You are a medieval NPC responding in conversation.",
                 messages=[{"role": "user", "content": prompt}],
@@ -352,6 +453,19 @@ async def continue_conversation(
                 purpose="conversation",
             )
         except Exception:
+            if force_llm:
+                # Player chats must NEVER silently fall back to the
+                # canned "Indeed, quite so." string — that produced
+                # a misleading UX where the player couldn't tell a
+                # real reply from a stub. Surface the error so the
+                # player sees something is wrong and the log has
+                # the real cause.
+                logger.exception(
+                    "Player-chat LLM call failed for %s — surfacing "
+                    "the error rather than stub-replying",
+                    npc.name,
+                )
+                raise
             message = _fallback_response(npc)
     else:
         message = _fallback_response(npc)
@@ -495,14 +609,21 @@ def _fallback_greeting(npc: NPC) -> str:
     return npc._rng.choice(greetings)
 
 
+_FALLBACK_RESPONSES: tuple[str, ...] = (
+    "Indeed, quite so.",
+    "Aye, I suppose you're right about that.",
+    "Interesting. I hadn't thought of it that way.",
+    "Ha! You always know what to say.",
+    "Well, I must be getting on with things soon.",
+    "That's good to hear. Things are well enough on my end too.",
+)
+
+# Exposed for the `test_player_chat_never_canned` regression gate.
+# Renaming the alias is fine; do not rename the tuple itself without
+# updating that test.
+_FALLBACK_RESPONSES_FOR_TEST = _FALLBACK_RESPONSES
+
+
 def _fallback_response(npc: NPC) -> str:
     """Simple canned response for tier 3+ NPCs."""
-    responses = [
-        "Indeed, quite so.",
-        "Aye, I suppose you're right about that.",
-        "Interesting. I hadn't thought of it that way.",
-        "Ha! You always know what to say.",
-        "Well, I must be getting on with things soon.",
-        "That's good to hear. Things are well enough on my end too.",
-    ]
-    return npc._rng.choice(responses)
+    return npc._rng.choice(_FALLBACK_RESPONSES)

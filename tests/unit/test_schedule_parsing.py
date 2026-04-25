@@ -147,6 +147,104 @@ class TestParseLLMSchedule:
         slots = {e.slot for e in entries}
         assert "night" in slots
 
+    def test_gemma_prose_with_title_and_rationales(self):
+        """Real-world Gemma output wraps each entry with a bold title
+        and an italic rationale line in parentheses. Neither should
+        leak into the schedule as an activity."""
+        response = (
+            "**Day 33: A Schedule for Seren**\n"
+            "\n"
+            "**7:00 AM - 8:00 AM:** Wake up and Morning Ritual, The Tavern.\n"
+            "*(Focus: Gentle start, addressing low energy.)*\n"
+            "\n"
+            "**8:00 AM - 9:30 AM:** Inventory and Morning Prep, The Tavern.\n"
+            "*(Focus: Conscientious work. Seren reviews stock.)*\n"
+            "\n"
+            "**12:30 PM - 1:30 PM:** Midday Meal, The Tavern.\n"
+            "*(Focus: Hunger. Seren eats a hearty meal.)*\n"
+            "\n"
+            "**4:00 PM - 6:00 PM:** Relationship Time with Dara.\n"
+            "*(Focus: Relationship.)*\n"
+            "\n"
+            "**10:00 PM:** Close up and sleep.\n"
+        )
+        entries = _parse_llm_schedule(response)
+        activities = [e.activity for e in entries]
+        # None of the title/rationale fragments should have survived.
+        for bad in (
+            "Day 33", "A Schedule for Seren",
+            "Focus:", "Gentle start", "Hunger",
+            "Seren's Daily Schedule",
+        ):
+            for act in activities:
+                assert bad not in act, (
+                    f"Prose fragment {bad!r} leaked into activity {act!r}"
+                )
+        # And we should have at least one real entry per phase.
+        slots = {e.slot for e in entries}
+        assert "early_morning" in slots
+        assert "morning" in slots
+        assert "afternoon" in slots
+        assert "night" in slots
+
+    def test_markdown_table_format(self):
+        """Some Gemma responses use markdown tables. Header and
+        separator rows must not be parsed as activities; data rows
+        should extract from the Activity column."""
+        response = (
+            "| Time Range | Activity | Location | Rationale |\n"
+            "|------------|----------|----------|-----------|\n"
+            "| 06:00 | Wake and dress | Home | Start day |\n"
+            "| 09:00 | Open the forge | Work | Work begins |\n"
+            "| 13:00 | Eat lunch at tavern | Tavern | Hunger |\n"
+            "| 21:00 | Walk home and sleep | Home | Rest |\n"
+        )
+        entries = _parse_llm_schedule(response)
+        activities = [e.activity for e in entries]
+        for bad in ("Time Range", "Activity", "Rationale", "|-"):
+            for act in activities:
+                assert bad not in act, (
+                    f"Table header fragment {bad!r} leaked into activity {act!r}"
+                )
+        # Activity column content is kept.
+        combined = " ".join(activities).lower()
+        assert "open the forge" in combined
+        assert "walk home" in combined
+
+    def test_insufficient_lines_fall_back_to_template(self):
+        """If Gemma returns prose with no time-stamped entries, use the
+        occupation fallback rather than fabricate a half-empty schedule."""
+        from core.npc.cognition.plan import DEFAULT_SCHEDULES
+        response = (
+            "**Seren's Daily Schedule - Day 32**\n"
+            "Focus: Rebuilding energy, managing the tavern.\n"
+            "| Time Range | Activity | Location | Rationale |\n"
+        )
+        fallback = DEFAULT_SCHEDULES["tavern_keeper"]
+        entries = _parse_llm_schedule(response, fallback=fallback)
+        # Should be the tavern_keeper fallback, not a 1-entry half-day.
+        assert len(entries) == len(fallback)
+        assert {e.slot for e in entries} == {e.slot for e in fallback}
+
+    def test_truncated_response_still_usable(self):
+        """max_tokens cutoff leaves the response half-finished — we
+        should still extract whatever complete time-stamped lines exist."""
+        response = (
+            "**7:00 AM:** Eat breakfast at home\n"
+            "**9:00 AM:** Tend the crops at the fields\n"
+            "**13:00:** Eat lunch at the tavern\n"
+            "**17:00:** Head to the ta"   # truncated mid-word
+        )
+        entries = _parse_llm_schedule(response)
+        # First three entries should parse cleanly; truncated 4th may or
+        # may not survive — either is acceptable as long as no garbage.
+        assert len(entries) >= 3
+        # The accepted truncated entry, if present, must still have a
+        # non-empty activity and location.
+        for e in entries:
+            assert e.activity
+            assert e.location
+
 
 # ---------- Template schedules ----------
 

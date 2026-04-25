@@ -282,6 +282,7 @@ class MockProvider(LLMProvider):
     """
 
     def __init__(self, responses: dict[str, str] | None = None):
+        super().__init__()
         # Legacy per-purpose overrides (exact string returned)
         self._overrides: dict[str, str] = responses or {}
         self.call_log: list[dict[str, Any]] = []
@@ -317,6 +318,27 @@ class MockProvider(LLMProvider):
             "system": system, "messages": messages,
             "max_tokens": max_tokens, "purpose": purpose,
         })
+
+        # Always yield to the event loop so batched mock calls from
+        # asyncio.gather (e.g. 8 NPC schedules on startup) don't hog
+        # the loop and starve the movement tick broadcaster. Without
+        # this, the tick rate collapses during cognition_tick bursts.
+        import asyncio as _asyncio
+        import os as _os
+        await _asyncio.sleep(0)
+
+        # Optional artificial latency for tests that need to observe
+        # behaviour during long-running LLM calls (e.g. verifying the
+        # WS receive loop isn't blocked). Set SMALLVILLE_MOCK_DELAY_MS
+        # to N to make every conversation call sleep N ms.
+        if purpose in ("conversation", "conversation_initiate"):
+            delay_ms = _os.environ.get("SMALLVILLE_MOCK_DELAY_MS", "")
+            try:
+                d = float(delay_ms) if delay_ms else 0.0
+            except ValueError:
+                d = 0.0
+            if d > 0:
+                await _asyncio.sleep(d / 1000.0)
 
         # Legacy exact-match overrides take priority
         if purpose in self._overrides:

@@ -339,55 +339,57 @@ class TestSpatialMemory:
 
 class TestMemoryManager:
 
-    @pytest.mark.asyncio
-    async def test_record_observation(self, memory_mgr):
-        mem_id = await memory_mgr.record_observation(
-            npc_id="npc_1",
-            description="Saw Alice working at the forge",
-            importance=0.6,
-            game_time=100.0,
-            location_x=5,
-            location_z=10,
-            tile_sector="market",
-            tile_arena="blacksmith",
-        )
-        assert mem_id
+    def test_record_observation(self, memory_mgr):
+        async def _run():
+            mem_id = await memory_mgr.record_observation(
+                npc_id="npc_1",
+                description="Saw Alice working at the forge",
+                importance=0.6,
+                game_time=100.0,
+                location_x=5,
+                location_z=10,
+                tile_sector="market",
+                tile_arena="blacksmith",
+            )
+            assert mem_id
 
-        # Check episodic stored
-        recent = memory_mgr.episodic.get_recent("npc_1")
-        assert len(recent) == 1
+            # Check episodic stored
+            recent = memory_mgr.episodic.get_recent("npc_1")
+            assert len(recent) == 1
 
-        # Check spatial updated
-        sectors = memory_mgr.spatial.get_known_sectors("npc_1")
-        assert "market" in sectors
+            # Check spatial updated
+            sectors = memory_mgr.spatial.get_known_sectors("npc_1")
+            assert "market" in sectors
+        asyncio.new_event_loop().run_until_complete(_run())
 
-    @pytest.mark.asyncio
-    async def test_record_conversation(self, memory_mgr):
-        await memory_mgr.record_conversation(
-            npc_a_id="npc_1",
-            npc_b_id="npc_2",
-            npc_a_name="Thorin",
-            npc_b_name="Elara",
-            exchanges=[
-                {"speaker": "Thorin", "message": "Good day!"},
-                {"speaker": "Elara", "message": "Hello, how's the forge?"},
-            ],
-            game_time=200.0,
-        )
+    def test_record_conversation(self, memory_mgr):
+        async def _run():
+            await memory_mgr.record_conversation(
+                npc_a_id="npc_1",
+                npc_b_id="npc_2",
+                npc_a_name="Thorin",
+                npc_b_name="Elara",
+                exchanges=[
+                    {"speaker": "Thorin", "message": "Good day!"},
+                    {"speaker": "Elara", "message": "Hello, how's the forge?"},
+                ],
+                game_time=200.0,
+            )
 
-        # Both NPCs should have conversation memories
-        mem_a = memory_mgr.episodic.get_recent("npc_1")
-        mem_b = memory_mgr.episodic.get_recent("npc_2")
-        assert len(mem_a) >= 1
-        assert len(mem_b) >= 1
+            # Both NPCs should have conversation memories
+            mem_a = memory_mgr.episodic.get_recent("npc_1")
+            mem_b = memory_mgr.episodic.get_recent("npc_2")
+            assert len(mem_a) >= 1
+            assert len(mem_b) >= 1
 
-        # Event should be recorded
-        events = memory_mgr.structured.get_events(event_type="conversation")
-        assert len(events) == 1
+            # Event should be recorded
+            events = memory_mgr.structured.get_events(event_type="conversation")
+            assert len(events) == 1
 
-        # Relationship fact should exist
-        facts = memory_mgr.structured.get_facts("npc_1")
-        assert any(f.predicate == "spoke_with" for f in facts)
+            # Relationship fact should exist
+            facts = memory_mgr.structured.get_facts("npc_1")
+            assert any(f.predicate == "spoke_with" for f in facts)
+        asyncio.new_event_loop().run_until_complete(_run())
 
     def test_retrieve_context(self, memory_mgr):
         memory_mgr.episodic.add_memory(
@@ -449,16 +451,17 @@ class TestMemoryManager:
         assert len(summary["recent_memories"]) >= 1
         assert len(summary["facts"]) >= 1
 
-    @pytest.mark.asyncio
-    async def test_record_reflection(self, memory_mgr):
-        mem_id = await memory_mgr.record_reflection(
-            "npc_1", "I should visit the market more often", game_time=500,
-        )
-        assert mem_id
+    def test_record_reflection(self, memory_mgr):
+        async def _run():
+            mem_id = await memory_mgr.record_reflection(
+                "npc_1", "I should visit the market more often", game_time=500,
+            )
+            assert mem_id
 
-        recent = memory_mgr.episodic.get_recent("npc_1", category="reflection")
-        assert len(recent) == 1
-        assert "market" in recent[0].description
+            recent = memory_mgr.episodic.get_recent("npc_1", category="reflection")
+            assert len(recent) == 1
+            assert "market" in recent[0].description
+        asyncio.new_event_loop().run_until_complete(_run())
 
     def test_fact_extraction(self, memory_mgr):
         """Heuristic fact extraction from observation text."""

@@ -21,6 +21,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, TYPE_CHECKING
 
+from core.npc.cognition.goal_mapper import (
+    GOAL_ACTION_BONUS, GOAL_TAG_BONUS,
+    aggregate_boost_actions, aggregate_boost_tags,
+)
+
 if TYPE_CHECKING:
     from core.npc.models import NPC
     from core.npc.cognition.planner.actions import ActionDef
@@ -145,6 +150,10 @@ class UtilityScorer:
         Actions whose precondition fails are excluded entirely.
         """
         needs = self.need_extractor(npc, ctx)
+        # Aggregate goal affinity once per pass — it's identical for
+        # every action scored on this NPC's tick.
+        boost_actions = aggregate_boost_actions(npc)
+        boost_tags = aggregate_boost_tags(npc)
         results: list[ScoredAction] = []
 
         for action in actions:
@@ -156,7 +165,11 @@ class UtilityScorer:
                 except Exception:
                     continue  # broken precondition = skip
 
-            score, breakdown = self.score_action(npc, ctx, action, needs)
+            score, breakdown = self.score_action(
+                npc, ctx, action, needs,
+                boost_actions=boost_actions,
+                boost_tags=boost_tags,
+            )
 
             # Resolve target
             target = None
@@ -183,9 +196,17 @@ class UtilityScorer:
         ctx: PlannerContext,
         action: ActionDef,
         needs: dict[str, float],
+        boost_actions: set[str] | None = None,
+        boost_tags: set[str] | None = None,
     ) -> tuple[float, dict[str, float]]:
         """
         Compute the utility score for a single action.
+
+        `boost_actions` and `boost_tags` come from the NPC's active
+        derived goals (see `goal_mapper`). Passed by `evaluate_all`
+        so they're computed once per evaluation pass. If omitted
+        (e.g. a caller scoring a single action in isolation), they
+        are resolved from the NPC on demand.
 
         Returns (total_score, breakdown_dict).
         """
@@ -195,6 +216,11 @@ class UtilityScorer:
                 npc, ctx, action,
             )
             return (custom_score, {"custom": custom_score})
+
+        if boost_actions is None:
+            boost_actions = aggregate_boost_actions(npc)
+        if boost_tags is None:
+            boost_tags = aggregate_boost_tags(npc)
 
         breakdown: dict[str, float] = {}
 
@@ -226,6 +252,16 @@ class UtilityScorer:
         time_score *= self.time_multiplier
         breakdown["time"] = round(time_score, 3)
 
-        total = base + need_score + personality_score + time_score
+        # 5. Goal affinity — derived goals bias the NPC toward
+        # action_ids they explicitly recommend, and more weakly toward
+        # actions that share a tag with the goal's themes.
+        goal_bonus = 0.0
+        if action.action_id in boost_actions:
+            goal_bonus += GOAL_ACTION_BONUS
+        if boost_tags and action.tags & boost_tags:
+            goal_bonus += GOAL_TAG_BONUS
+        breakdown["goal_affinity"] = round(goal_bonus, 3)
+
+        total = base + need_score + personality_score + time_score + goal_bonus
         breakdown["total"] = round(total, 3)
         return (total, breakdown)

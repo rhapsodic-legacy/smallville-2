@@ -6,7 +6,7 @@ gather resources, contribute materials, provide labour, and complete
 the building. Produces rich per-NPC diagnostics showing what everyone
 was doing, who contributed, and whether NPCs maintained life balance.
 
-Run: python3 tests/simulation/test_church_construction.py
+Run: python3 tests/simulation/diagnostic_church_construction.py
 """
 
 from __future__ import annotations

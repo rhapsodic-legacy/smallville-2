@@ -26,6 +26,7 @@ const OCCUPATION_COLOURS = {
     priest:        0xf5f5dc,
     guard:         0x4a5568,
     labourer:      0x7b6b4f,
+    traveller:     0x2266aa,
 };
 
 const DEFAULT_CLOTHING_COLOUR = 0x6b6b6b;
@@ -136,6 +137,17 @@ function _createOccupationIndicator(occupation) {
             const geo = new THREE.ConeGeometry(0.2, 0.08, 8);
             const mat = new THREE.MeshStandardMaterial({ color: 0xd4a946 });
             return new THREE.Mesh(geo, mat);
+        }
+        case 'traveller': {
+            // Wide-brim travel hat
+            const geo = new THREE.CylinderGeometry(0.2, 0.22, 0.06, 8);
+            const mat = new THREE.MeshStandardMaterial({ color: 0x3a2211 });
+            const brim = new THREE.Mesh(geo, mat);
+            const crownGeo = new THREE.CylinderGeometry(0.08, 0.1, 0.12, 8);
+            const crown = new THREE.Mesh(crownGeo, mat);
+            crown.position.y = 0.08;
+            brim.add(crown);
+            return brim;
         }
         default:
             return null;

@@ -85,6 +85,72 @@ client-server loop.
 (positions over time, departure/arrival timing, movement patterns) and flag anomalies.
 Diagnostics must be built INTO the system, not bolted on as tests.
 
+## Conversation Memory Failures
+
+### Attempt 6: Async iteration of `_active_conversations` in persistence loop
+**What:** `_persist_finished_conversations` iterated `_active_conversations.items()`
+directly while awaiting LLM calls, memory writes, and reflection inside the loop body.
+**Why it failed:** The chat task (`_handle_player_chat`) runs concurrently with the
+cognition loop. When the chat task inserted a new `Conversation` into
+`_active_conversations` during one of the awaits, Python raised
+`RuntimeError: dictionary changed size during iteration`. The exception killed the
+cognition tick. Because every tick tries to run persistence, the next tick raised again,
+and the whole day wedged — every NPC stayed indoors at midday on day 38 after a heavy
+conversational session on day 37.
+**Lesson:** Any async iteration over shared mutable state must snapshot the keys
+(`for x in list(d.items())`). A one-line fix; prevent the recurrence with a regression
+test that inserts a new conversation mid-loop.
+
+### Attempt 8: Unprotected `record_conversation` in persistence loop (house-staying v2)
+**What:** `_persist_finished_conversations` called `self.memory.record_conversation(...)`
+without a try/except. Inner `_extract_conversation_facts` makes an LLM call that can
+raise on timeout/provider error.
+**Why it failed:** Any exception propagated up through `_persist_finished_conversations`,
+aborting the rest of `cognition_tick` (step 6b overlap resolution, step 7 reflection,
+step 8 memory event drain). Worse: `clear_finished_conversations()` (called AFTER the
+persistence step) never ran, so the bad conversation stayed in `_active_conversations`
+and re-crashed every subsequent tick. Live result: the moment the player chatted with
+any NPC, every NPC appeared stuck in their house and formed only sparse perceptions
+for the rest of the game-day — and the behaviour persisted across day flips.
+Reported three times by Jesse; tests caught none of it because no test exercised the
+specific scenario "finished conversation whose `record_conversation` raises".
+**Lesson:** Every async call inside a persistence-loop body needs try/except with
+logger.exception. And every per-item body must guarantee a persistence-flag update
+(success OR swallowed failure) BEFORE the loop moves on, otherwise a bad item
+crash-loops forever. Fix (2026-04-22): added `Conversation.persisted` flag, flipped
+to True before `record_conversation` runs, inner try/except around the call, bad
+conv is swept by the cleanup pass same as a successful one. Regression tests:
+`tests/simulation/test_chat_does_not_freeze_npcs.py`.
+
+### Attempt 9: Eager town-goal contribution at schedule injection
+**What:** `_inject_goal_entry(npc, day)` called `town_agenda.record_contribution(...)`
+at injection time — before the NPC had moved, let alone completed the activity.
+**Why it failed:** Goals with `required_contributions=N` plus N personality-matching
+NPCs completed the same tick they were proposed. Dara's memory log showed both the
+"Prepare the harvest festival" (day 78) and "Repair the old bridge" (day 83) agendas
+propose AND complete at the same game-minute, with exactly the required number of
+"contributors" listed who had never moved. Worse still: `TownGoal.record_contribution`
+used `self.contributors.add(npc_id); self.progress += 1` — `contributors` is a set (dedups)
+but `progress` is a counter (doesn't), so a double-call by the same NPC would inflate
+`progress` beyond `len(contributors)`.
+**Lesson:** "Eager" bookkeeping is deterministic but wrong when the book entry is
+supposed to reflect physical activity. Fix (2026-04-22): moved the contribution call
+to `_advance_npc_action` (fires when an entry with a `town_goal_id` finishes its
+allotted duration) and made `record_contribution` dedup by npc_id.
+Regression tests: `tests/simulation/test_agenda_not_insta_complete.py`.
+
+### Attempt 7: Router-only gating for post-conversation reflection
+**What:** After a conversation ended, reflection was triggered only when the cognition
+router returned `Route.LLM`. For low-proximity or budget-pressured NPCs, reflection
+was skipped entirely.
+**Why it failed:** A player-driven accusation (high narrative weight) produced a
+verbatim transcript + outcome records + sparkle — but no insight. NPCs never drew
+conclusions. The router's scoring is general-purpose; it doesn't know a conversation
+produced structured outcomes.
+**Lesson:** Let the outcome-extraction step vote. If any Phase B outcome was
+extracted (commitment, accusation, relayed claim), force the LLM reflection path
+regardless of the router's default. Neutral chit-chat still defers to the router.
+
 ### Problem: No diagnostics in the simulation itself
 **Why:** The server had no way to report what NPCs were actually doing, why they chose
 their actions, or how their movement looked over time. Testing was blind — either look

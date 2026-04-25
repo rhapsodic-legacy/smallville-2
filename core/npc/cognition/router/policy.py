@@ -39,6 +39,8 @@ DECISION_TYPES = {
     "reflection",
     "gather_choice",
     "work_choice",
+    "compaction",  # Phase H.6 — day/week memory compaction
+    "self_review",  # Phase I.1 — bedtime commitment review
 }
 
 
@@ -90,6 +92,28 @@ class CognitionPolicy:
         "reflection": ROUTE_AUTO,
         "gather_choice": ROUTE_DETERMINISTIC,
         "work_choice": ROUTE_DETERMINISTIC,
+        # Day/week memory compaction (Phase H.6). Auto-routing means
+        # the cost scales with focus — summaries for NPCs the player
+        # is actually watching get the LLM treatment; background NPCs
+        # fall through to the deterministic heuristic fallback
+        # `core.memory.compaction` already ships. Exactly one call per
+        # NPC per game day, predictable cost rather than spikey.
+        "compaction": ROUTE_AUTO,
+        # Bedtime self-review (Phase I.1) is the narrative voice of
+        # each NPC's personal arc — heuristic fallback loses the
+        # character-level review entirely. Defaulting to LLM means
+        # every autonomous, non-tier-4 NPC gets a voiced review
+        # every game day; the call is short and runs once per NPC
+        # at day rollover, not during active scenes.
+        "self_review": ROUTE_LLM,
+        # Subtask decomposition is deterministic by default. Calling the
+        # LLM 8 times in a row at every dispatch (once per NPC, once per
+        # schedule entry advance) serialises every NPC behind ~15-30s of
+        # Gemma inference on local hardware and starves them of their
+        # schedule — they sit in their homes for minutes before the
+        # first action fires. The template decomposer produces
+        # perfectly usable subtasks.
+        "task_decompose": ROUTE_DETERMINISTIC,
     })
 
     default_mode: str = ROUTE_AUTO

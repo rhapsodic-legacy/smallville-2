@@ -115,6 +115,7 @@ async def generate_daily_schedule(
     llm: LLMProvider,
     current_day: int,
     relationship_summary: str = "",
+    town_agenda_summary: str = "",
 ) -> list[ScheduleEntry]:
     """
     Generate a daily schedule for an NPC.
@@ -128,7 +129,10 @@ async def generate_daily_schedule(
     config = get_tier_config(npc.cognition_tier)
 
     if config.uses_llm:
-        schedule = await _llm_schedule(npc, llm, current_day, relationship_summary)
+        schedule = await _llm_schedule(
+            npc, llm, current_day, relationship_summary,
+            town_agenda_summary=town_agenda_summary,
+        )
     else:
         schedule = _template_schedule(npc)
 
@@ -153,6 +157,7 @@ async def _llm_schedule(
     llm: LLMProvider,
     current_day: int,
     relationship_summary: str = "",
+    town_agenda_summary: str = "",
 ) -> list[ScheduleEntry]:
     """Generate schedule via LLM, with fallback to template on failure."""
     from core.npc.llm_client import format_prompt
@@ -167,6 +172,7 @@ async def _llm_schedule(
             personality=npc.personality.to_description(),
             self_concept=npc.self_concept_summary(),
             goals="; ".join(npc.long_term_goals[:3]),
+            town_agenda=town_agenda_summary,
             health=f"{npc.health:.0%}",
             energy=f"{npc.energy:.0%}",
             hunger=f"{npc.hunger:.0%}",

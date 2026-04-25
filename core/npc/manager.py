@@ -45,14 +45,17 @@ from core.npc.cognition.router import (
     CognitionRouter, Route, CognitionPolicy,
 )
 from core.npc.cognition.planner import DeterministicPlanner, PlannedAction
+from core.npc.cognition.goal_mapper import sync_npc_goals
 from core.npc.economy_tick import EconomyTick
 from core.memory.manager import MemoryManager
 from core.memory.reflection import (
     run_reflection, run_reflection_with_intents,
-    reflect_on_conversation, ActionIntent,
+    reflect_on_conversation, ActionIntent, classify_insight,
+    extract_important_note,
     apply_personality_drift, detect_identity_claims,
     IdentityClaim,
 )
+from core.memory.self_review import apply_identity_reinforcement
 from core.relationships.sentiment import SentimentTracker
 from core.relationships.structures import FactionManager
 from core.events.impact import EventImpactSystem, GameEvent
@@ -144,11 +147,28 @@ class NPCManager:
         self.guardrails = GuardrailEngine()
         self._last_eval_day: int = -1
 
+        # Phase H.6 — per-NPC cursor for the most recent day/week
+        # compacted. The cognition tick compacts `current_day - 1`
+        # once per NPC at the first tick of a new day, then rolls up
+        # the week when `day % 7 == 0`. Missing entries mean "never
+        # compacted"; we do not backfill missed days — NPCs that
+        # joined mid-run only lose a bit of provenance structure.
+        self._last_compacted_day: dict[str, int] = {}
+        self._last_compacted_week: dict[str, int] = {}
+
+        # Phase I.1 — bedtime self-review cursor. Mirrors
+        # `_last_compacted_day`: review runs once per NPC per game
+        # day on the tick after compact_day succeeds for the
+        # previous day. No backfill, same cursor-guard pattern.
+        self._last_self_reviewed_day: dict[str, int] = {}
+
         # Collective town goals — overseer proposes, scheduler reads,
         # client renders. Gives the town a shared sense of direction
         # beyond individual NPC schedules.
         self.town_agenda = TownAgenda()
         self.town_agenda.add_completion_listener(self._on_goal_completed)
+        self.town_agenda.add_propose_listener(self._on_goal_proposed)
+        self.town_agenda.add_expire_listener(self._on_goal_expired)
 
         # Focus point for tier assignment (defaults to town centre)
         self.focus_x: int = 0
@@ -157,6 +177,7 @@ class NPCManager:
         # Tick tracking
         self._last_slot: str = ""
         self._current_minutes: float = 0.0
+        self._current_day: int = 0
         self._conversation_check_counter: int = 0
         self._reflection_check_counter: int = 0
 
@@ -527,6 +548,7 @@ class NPCManager:
         """
         current_minutes = clock.day * MINUTES_PER_DAY + clock.minutes
         self._current_minutes = current_minutes
+        self._current_day = clock.day
         current_slot = clock.schedule_slot.value
         current_day = clock.day
 
@@ -549,6 +571,22 @@ class NPCManager:
         if current_day != self._last_eval_day and current_day > 0:
             self._last_eval_day = current_day
             await self._run_overseer_eval(current_day, current_minutes)
+
+        # 0c. Phase H.6 — daily memory compaction. Runs on the first
+        # tick of a new day, collapsing the PREVIOUS day's untagged
+        # firehose into a single day_summary per NPC. One LLM call
+        # per NPC per game day, routed through the cognition router
+        # so scene pressure / budget throttle it naturally. Week
+        # rollup piggybacks every 7th day.
+        if current_day > 0:
+            await self._run_daily_compaction(current_day - 1)
+            # Phase I.1 — bedtime self-review. Runs AFTER compaction
+            # in the same tick so the review can read the fresh
+            # day_summary. Router gate is independent per the policy
+            # (self_review defaults to ROUTE_LLM; compaction to
+            # ROUTE_AUTO) so a downgraded compaction doesn't silently
+            # downgrade the review too.
+            await self._run_daily_self_review(current_day - 1)
 
         # 1. Update tiers based on focus point
         update_all_tiers(self.npcs, self.focus_x, self.focus_z)
@@ -585,6 +623,9 @@ class NPCManager:
                         generate_daily_schedule(
                             npc, self.llm, current_day,
                             relationship_summary=rel_summary,
+                            town_agenda_summary=self.town_agenda.summary_for_prompt(
+                                npc.npc_id,
+                            ),
                         )
                     )
                 else:
@@ -733,6 +774,31 @@ class NPCManager:
         the next entry's location, decomposes into subtasks, and queues
         a staggered departure. Sleep is just another action — no snap.
         """
+        # Phase F town-goal contribution: if the entry that just
+        # finished was a town-goal entry, credit the NPC now —
+        # NOT at injection time. Eager injection-time crediting
+        # caused every goal with `required=N` to complete in the
+        # same tick it was proposed with N personality-matching
+        # NPCs "contributing" without having moved at all.
+        if 0 <= npc.schedule_index < len(npc.daily_schedule):
+            finishing = npc.daily_schedule[npc.schedule_index]
+            goal_id = getattr(finishing, "town_goal_id", None)
+            if goal_id:
+                try:
+                    completed = self.town_agenda.record_contribution(
+                        goal_id, npc.npc_id, current_day=npc.schedule_day,
+                    )
+                    logger.info(
+                        "AGENDA %s: contributed to goal=%s (slot=%s%s)",
+                        npc.name, goal_id, finishing.slot,
+                        ", COMPLETED" if completed else "",
+                    )
+                except Exception:
+                    logger.exception(
+                        "AGENDA contribution failed for %s goal=%s",
+                        npc.name, goal_id,
+                    )
+
         # Advance to next schedule entry
         npc.schedule_index += 1
 
@@ -1038,15 +1104,77 @@ class NPCManager:
             if not npc_a or not npc_b:
                 continue
 
-            # Determine who speaks next
+            # Determine who speaks next. Pass the responder's agenda
+            # summary so their line can reference town matters they've
+            # committed to. Also pass any unresolved matters this
+            # responder holds about their partner (Phase C) so the
+            # prompt can nudge them to raise it.
             last_speaker = conv.exchanges[-1].speaker_id if conv.exchanges else None
+            current_day_for_prompts = getattr(
+                self, "_current_day", 0,
+            )
             if last_speaker == npc_a.npc_id:
+                matters = self.memory.retrieve_unresolved_matters(
+                    npc_b.npc_id,
+                    partner_id=npc_a.npc_id,
+                    partner_name=npc_a.name,
+                )
                 await continue_conversation(
                     npc_b, npc_a, self.llm, memory_manager=self.memory,
+                    town_agenda_summary=self.town_agenda.summary_for_prompt(
+                        npc_b.npc_id,
+                    ),
+                    shared_agenda_summary=(
+                        self.town_agenda.shared_matters_for_prompt(
+                            npc_b.npc_id, npc_a.npc_id,
+                            current_day=current_day_for_prompts,
+                        )
+                    ),
+                    unresolved_matters_summary=(
+                        self.memory.format_unresolved_matters(
+                            matters, npc_a.name,
+                        )
+                    ),
                 )
             else:
+                matters = self.memory.retrieve_unresolved_matters(
+                    npc_a.npc_id,
+                    partner_id=npc_b.npc_id,
+                    partner_name=npc_b.name,
+                )
                 await continue_conversation(
                     npc_a, npc_b, self.llm, memory_manager=self.memory,
+                    town_agenda_summary=self.town_agenda.summary_for_prompt(
+                        npc_a.npc_id,
+                    ),
+                    shared_agenda_summary=(
+                        self.town_agenda.shared_matters_for_prompt(
+                            npc_a.npc_id, npc_b.npc_id,
+                            current_day=current_day_for_prompts,
+                        )
+                    ),
+                    unresolved_matters_summary=(
+                        self.memory.format_unresolved_matters(
+                            matters, npc_b.name,
+                        )
+                    ),
+                )
+
+            # Phase A.4 — per-turn persistence for NPC↔NPC chats.
+            # Same cursor-based helper the player path uses. Each
+            # tick, any newly-added exchanges land in both
+            # participants' memory immediately.
+            try:
+                await self.memory.persist_new_exchanges(
+                    conv, npc_a, npc_b,
+                    game_time=current_minutes,
+                    location_x=int(npc_a.x),
+                    location_z=int(npc_a.z),
+                )
+            except Exception:
+                logger.exception(
+                    "NPC↔NPC per-turn persistence failed (conv=%s)",
+                    getattr(conv, "conv_id", "?"),
                 )
 
         # Check for new conversation opportunities (tier 1-3 only)
@@ -1062,27 +1190,75 @@ class NPCManager:
                 if self._skip_autonomous(other):
                     continue
                 if should_initiate_conversation(npc, other, current_minutes):
+                    initiator_matters = self.memory.retrieve_unresolved_matters(
+                        npc.npc_id,
+                        partner_id=other.npc_id,
+                        partner_name=other.name,
+                    )
                     await initiate_conversation(
                         npc, other, self.llm, current_minutes,
                         memory_manager=self.memory,
                         grid=self.grid,
                         all_npcs=self.npcs,
+                        town_agenda_summary=self.town_agenda.summary_for_prompt(
+                            npc.npc_id,
+                        ),
+                        shared_agenda_summary=(
+                            self.town_agenda.shared_matters_for_prompt(
+                                npc.npc_id, other.npc_id,
+                                current_day=self._current_day,
+                            )
+                        ),
+                        unresolved_matters_summary=(
+                            self.memory.format_unresolved_matters(
+                                initiator_matters, other.name,
+                            )
+                        ),
                     )
                     break  # one conversation attempt per tick per NPC
 
     async def _persist_finished_conversations(
         self, current_minutes: float,
     ) -> None:
-        """Save finished conversations to memory before they're cleaned up."""
+        """Save finished conversations to memory before they're cleaned up.
+
+        Iterates a snapshot of `_active_conversations` rather than the
+        live dict: the body awaits LLM / memory calls, during which
+        the chat task (`_handle_player_chat` in server/main.py) can
+        add new conversations, and we must not raise
+        `RuntimeError: dictionary changed size during iteration`
+        mid-tick — that took the whole cognition loop down once in
+        production and froze every NPC indoors the following day.
+        """
         from core.npc.cognition.converse import _active_conversations
 
-        for key, conv in _active_conversations.items():
-            if not conv.finished or not conv.exchanges:
+        for key, conv in list(_active_conversations.items()):
+            if not conv.finished:
+                continue
+            # Empty-but-finished conversations have nothing worth
+            # persisting, but they still must flip to persisted=True
+            # so `clear_finished_conversations()` sweeps them out of
+            # the active registry. Without this line, a short
+            # conversation that ended before any exchange stayed in
+            # the registry forever and broke sim responsiveness
+            # tests that expected the tick loop to eventually clear.
+            if not conv.exchanges:
+                conv.persisted = True
+                continue
+            # Idempotency: a persistence attempt has already run for
+            # this conversation (success OR swallowed failure). Skip
+            # to stop the retry-crash loop that used to freeze every
+            # NPC indoors whenever any downstream step threw.
+            if conv.persisted:
                 continue
 
             npc_a = self.get_npc(conv.npc_a_id)
             npc_b = self.get_npc(conv.npc_b_id)
             if not npc_a or not npc_b:
+                # Without participants we can't do anything with this
+                # conversation; mark it persisted so the cleanup
+                # sweep removes it instead of re-iterating forever.
+                conv.persisted = True
                 continue
 
             exchanges = [
@@ -1090,16 +1266,118 @@ class NPCManager:
                 for e in conv.exchanges
             ]
 
-            await self.memory.record_conversation(
-                npc_a_id=conv.npc_a_id,
-                npc_b_id=conv.npc_b_id,
-                npc_a_name=npc_a.name,
-                npc_b_name=npc_b.name,
-                exchanges=exchanges,
-                game_time=current_minutes,
-                location_x=npc_a.x,
-                location_z=npc_a.z,
+            # Claim persistence up front. Even if any step below
+            # throws an uncaught exception and aborts the rest of
+            # this tick, next tick skips this conv via the
+            # `if conv.persisted: continue` guard above — so a
+            # single bad conversation can never crash-loop the
+            # cognition tick and freeze every NPC. That regression
+            # took an entire game day out of a live session; see
+            # FAILED_APPROACHES.md Attempt 6 for the prior variant
+            # (dict-size-changed-during-iteration).
+            conv.persisted = True
+
+            # Defensive wrapper around `record_conversation` — the
+            # LLM fact-extraction inside it can throw on timeout or
+            # provider error. Phase A per-turn memories have already
+            # landed by this point so the conversation isn't lost,
+            # but we must NOT propagate the exception and skip the
+            # rest of the cognition tick (step 6b+7+).
+            try:
+                await self.memory.record_conversation(
+                    npc_a_id=conv.npc_a_id,
+                    npc_b_id=conv.npc_b_id,
+                    npc_a_name=npc_a.name,
+                    npc_b_name=npc_b.name,
+                    exchanges=exchanges,
+                    game_time=current_minutes,
+                    location_x=npc_a.x,
+                    location_z=npc_a.z,
+                )
+            except Exception:
+                logger.exception(
+                    "record_conversation failed for conv=%s "
+                    "(%s ↔ %s); per-turn memories remain, "
+                    "consolidation + outcomes will be skipped",
+                    conv.conv_id, npc_a.name, npc_b.name,
+                )
+                continue
+
+            # Phase A.3 — consolidate: the summary above is the durable
+            # memory; the per-turn entries we wrote mid-conversation
+            # are now redundant. Sweep them by conv_id. If any were
+            # missed (tier changes, exceptions), they simply weren't
+            # there — the call is a no-op in that case.
+            self.memory.consolidate_conversation_turns(conv.conv_id)
+
+            # Phase C.3 — BEFORE writing new outcomes, flip
+            # `unresolved` → False on matters each participant held
+            # against the other that are actually aired in this
+            # transcript. Ordering is deliberate: resolving first
+            # means we inspect only PRIOR matters; a brand-new
+            # relayed_claim about this exact topic (written by the
+            # B step below) doesn't falsely resolve itself.
+            try:
+                transcript_text = " ".join(
+                    e.get("message", "") for e in exchanges
+                )
+                self.memory.resolve_matters_from_transcript(
+                    npc_id=npc_a.npc_id,
+                    partner_id=npc_b.npc_id,
+                    partner_name=npc_b.name,
+                    transcript_text=transcript_text,
+                )
+                self.memory.resolve_matters_from_transcript(
+                    npc_id=npc_b.npc_id,
+                    partner_id=npc_a.npc_id,
+                    partner_name=npc_a.name,
+                    transcript_text=transcript_text,
+                )
+            except Exception:
+                logger.exception(
+                    "Matter resolution failed for conv=%s", conv.conv_id,
+                )
+
+            # Phase B.6 — extract structured outcomes (commitments,
+            # accusations, relayed claims) and persist them. Runs the
+            # heuristic pass unconditionally; LLM extractor attempted
+            # only when the NPC manager has one available. Failures
+            # are swallowed — the transcript memory from
+            # record_conversation is still enough to keep the sim
+            # coherent, structured records are an upgrade.
+            from core.memory.conversation_outcomes import (
+                ConversationOutcome, extract_outcomes,
             )
+            outcome: ConversationOutcome = ConversationOutcome()
+            try:
+                outcome = await extract_outcomes(
+                    exchanges,
+                    llm=self.llm if self.llm is not None else None,
+                )
+                if not outcome.is_empty():
+                    self.memory.store_conversation_outcomes(
+                        outcome,
+                        participants={
+                            npc_a.npc_id: npc_a.name,
+                            npc_b.npc_id: npc_b.name,
+                        },
+                        game_time=current_minutes,
+                        location_x=int(npc_a.x),
+                        location_z=int(npc_a.z),
+                    )
+                    logger.info(
+                        "OUTCOMES %s↔%s: +%d commitments, +%d accusations, "
+                        "+%d relayed (conv=%s)",
+                        npc_a.name, npc_b.name,
+                        len(outcome.commitments),
+                        len(outcome.accusations),
+                        len(outcome.relayed_claims),
+                        conv.conv_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Outcome extraction failed for conv=%s", conv.conv_id,
+                )
 
             # Fire conversation event through impact system
             self.events.process_event(GameEvent(
@@ -1110,35 +1388,39 @@ class NPCManager:
                 location_z=npc_a.z,
             ))
 
-            # Post-conversation reflection (router decides)
+            # Post-conversation reflection.
+            #
+            # When outcome extraction produced any structured record
+            # the conversation was by definition notable — force the
+            # LLM path regardless of the router's default decision.
+            # Otherwise let the router decide. Neutral chit-chat thus
+            # stays cheap.
+            #
+            # Bounded-latency: each reflection runs with a hard
+            # timeout and the TWO participants reflect concurrently
+            # (they're independent NPCs). A slow or stuck LLM call
+            # used to freeze the whole cognition tick — Jesse lost
+            # an entire game-day to that once (day 12+ frozen after
+            # 4-5 chained accusation chats). Bounding each call at
+            # 15s keeps the tick responsive even if the LLM is
+            # struggling; we just drop the reflection for that turn.
+            notable = not outcome.is_empty()
+            identity_conversation = {
+                "exchanges": list(exchanges),
+                "current_minutes": current_minutes,
+                "outcome": outcome,
+            }
+            # Always drift personality and detect identity claims
+            # regardless of reflection route — those are cheap and
+            # don't depend on LLM.
             for npc, other_id, other_name in [
                 (npc_a, npc_b.npc_id, npc_b.name),
                 (npc_b, npc_a.npc_id, npc_a.name),
             ]:
-                rd = self.router.route(
-                    npc, "reflection",
-                    focus_x=self.focus_x, focus_z=self.focus_z,
-                )
-                insight: str | None = None
-                if rd.route == Route.LLM:
-                    insight = await reflect_on_conversation(
-                        npc, other_name, exchanges,
-                        self.memory, self.llm, current_minutes,
-                    )
-
-                # Personality drift from the conversation text itself —
-                # applies even when the reflection step was skipped.
                 convo_text = " ".join(
                     e.get("message", "") for e in exchanges
                 )
                 apply_personality_drift(npc, convo_text, importance=0.6)
-                if insight:
-                    apply_personality_drift(npc, insight, importance=0.8)
-
-                # Identity-claim detection — the other party may have
-                # made a self-concept-altering claim about us. Each
-                # match is filtered/scored in _inject_self_concept_delta
-                # to avoid credulously accepting every role assertion.
                 claims = detect_identity_claims(
                     exchanges, listener_name=npc.name, speaker_id=other_id,
                 )
@@ -1146,6 +1428,123 @@ class NPCManager:
                     self._inject_self_concept_delta(
                         npc, claim, current_minutes,
                     )
+
+            # Concurrent reflection pass, bounded at 15s per NPC.
+            async def _reflect_one(
+                npc_: NPC, other_name_: str,
+            ) -> None:
+                rd = self.router.route(
+                    npc_, "reflection",
+                    focus_x=self.focus_x, focus_z=self.focus_z,
+                )
+                if rd.route != Route.LLM and not notable:
+                    return
+                try:
+                    insight = await asyncio.wait_for(
+                        reflect_on_conversation(
+                            npc_, other_name_, exchanges,
+                            self.memory, self.llm, current_minutes,
+                            outcome=outcome,
+                        ),
+                        timeout=15.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Reflection timed out for %s (conv=%s)",
+                        npc_.name, conv.conv_id,
+                    )
+                    return
+                except Exception:
+                    logger.exception(
+                        "Reflection failed for %s (conv=%s)",
+                        npc_.name, conv.conv_id,
+                    )
+                    return
+
+                if not insight:
+                    return
+                apply_personality_drift(npc_, insight, importance=0.8)
+
+                # Classify the insight into an action intent. If
+                # actionable, inject a temporary schedule entry so
+                # the NPC physically acts on their conclusion
+                # ("go talk to Dara") rather than just storing it.
+                # A reflection like "I distrust Bob" classifies as
+                # NO_ACTION and nothing is injected.
+                try:
+                    intent = await asyncio.wait_for(
+                        classify_insight(npc_, insight, self.llm),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug(
+                        "Action-intent classify timed out for %s",
+                        npc_.name,
+                    )
+                    intent = None
+                except Exception:
+                    logger.exception(
+                        "Action-intent classify failed for %s",
+                        npc_.name,
+                    )
+                    intent = None
+                if intent is not None:
+                    self._inject_reflection_entry(npc_, intent)
+
+                # Phase K.5 — surgical "important note" extraction.
+                # Cost-bounded (timeout + tier gate inside helper)
+                # and only worth running on notable conversations,
+                # which is exactly when we're already here.
+                try:
+                    note = await asyncio.wait_for(
+                        extract_important_note(
+                            npc_, insight, other_name_, self.llm,
+                        ),
+                        timeout=10.0,
+                    )
+                except asyncio.TimeoutError:
+                    logger.debug(
+                        "Important-note extraction timed out for %s",
+                        npc_.name,
+                    )
+                    note = None
+                except Exception:
+                    logger.exception(
+                        "Important-note extraction failed for %s",
+                        npc_.name,
+                    )
+                    note = None
+                if note is not None:
+                    note_text, note_tags = note
+                    # Anchor at least one tag to the partner so retrieval
+                    # by partner-name surfaces this note.
+                    partner_tag_set = set(note_tags) | {
+                        t for t in (other_name_.lower().replace(" ", "_"),)
+                        if t
+                    }
+                    self.memory.episodic.add_memory(
+                        npc_id=npc_.npc_id,
+                        description=note_text,
+                        category="note",
+                        importance=0.85,
+                        game_time=current_minutes,
+                        extra_metadata={
+                            "kind": "important_note",
+                            "source": "post_conversation_reflection",
+                            "partner_name": other_name_,
+                        },
+                        tags=partner_tag_set,
+                    )
+                    logger.info(
+                        "NOTE %s: '%s' [tags=%s]",
+                        npc_.name, note_text, sorted(partner_tag_set),
+                    )
+
+            await asyncio.gather(
+                _reflect_one(npc_a, npc_b.name),
+                _reflect_one(npc_b, npc_a.name),
+                return_exceptions=True,
+            )
 
     async def _check_reflections(self, current_minutes: float) -> None:
         """Check if any NPCs need a full reflection cycle (router decides).
@@ -1269,6 +1668,19 @@ class NPCManager:
             npc.name, claim.key, effective_delta, new_confidence,
             claim.source_text,
         )
+
+        # Close the identity → drive loop: refresh derived long-term
+        # goals so the planner's utility scorer starts biasing toward
+        # the new identity on the next tick. A claim that fails to
+        # clear its goal-floor is a no-op; a rising belief past the
+        # floor adds a goal; a decaying belief below the floor
+        # removes one.
+        added, removed = sync_npc_goals(npc)
+        if added or removed:
+            logger.info(
+                "GOALS %s: +%s / -%s (from self_concept)",
+                npc.name, added, removed,
+            )
         return True
 
     # Per-day fraction of the gap between current personality and
@@ -1430,11 +1842,16 @@ class NPCManager:
         Places the entry in the afternoon slot (where possible) so
         breakfast and morning work still happen. Replaces an existing
         afternoon slot rather than appending, to keep schedule total
-        duration intact. Records contribution immediately — the NPC
-        is on the hook even if they haven't physically arrived yet.
+        duration intact. The contribution is NOT recorded here any
+        more — eager crediting at injection caused every goal with
+        `required_contributions == N` to complete on the same tick
+        it was proposed, with N personality-matching NPCs listed as
+        contributors who never actually moved. Credit now lands in
+        `_advance_npc_action` when the NPC finishes the goal entry,
+        so the agenda is tied to time-in-slot rather than intent.
         The goal's completion triggers a town-event broadcast.
         """
-        goal = self.town_agenda.matching_goal_for(npc)
+        goal = self.town_agenda.matching_goal_for(npc, self.rng)
         if goal is None or not npc.daily_schedule:
             return
 
@@ -1461,20 +1878,35 @@ class NPCManager:
             duration_minutes=min(goal.duration_minutes, original.duration_minutes or goal.duration_minutes),
         )
         # Stash the goal id on the entry so we can credit the NPC
-        # when they actually arrive / the duration elapses.
+        # when `_advance_npc_action` finishes this entry.
         setattr(npc.daily_schedule[target_idx], "town_goal_id", goal.goal_id)
 
-        # Eager contribution: record it on injection. The physical
-        # arrival and activity is what the player sees; the book-
-        # keeping here ensures the agenda progresses deterministically
-        # even if an NPC gets pulled into a conversation en route.
-        completed = self.town_agenda.record_contribution(goal.goal_id, npc.npc_id)
         logger.info(
-            "AGENDA %s: committed to '%s' (%d/%d%s)",
-            npc.name, goal.title, goal.progress,
-            goal.required_contributions,
-            ", COMPLETED" if completed else "",
+            "AGENDA %s: committed to '%s' (goal=%s, deadline day %d)",
+            npc.name, goal.title, goal.goal_id, goal.deadline_day,
         )
+
+        # Phase F.2 — write a personal commitment memory. Fires before
+        # the completion listener so even for a goal that completes
+        # with this NPC's contribution, the commitment memory still
+        # lands first and the completion memory layers on top.
+        try:
+            self.memory.record_town_event_memory(
+                npc_id=npc.npc_id,
+                description=(
+                    f"I have agreed to {goal.activity_text} "
+                    f"(\"{goal.title}\") before day {goal.deadline_day}."
+                ),
+                category="commitment",
+                importance=0.7,
+                game_time=self._current_minutes,
+                goal_id=goal.goal_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to seed commitment memory for %s on %s",
+                npc.name, goal.goal_id,
+            )
 
     async def _check_replans(
         self, current_minutes: float, current_slot: str,
@@ -1522,6 +1954,140 @@ class NPCManager:
                 if npc.schedule_index < len(npc.daily_schedule):
                     entry = npc.daily_schedule[npc.schedule_index]
                     await self._dispatch_to_entry(npc, entry, current_slot)
+
+    async def _run_daily_compaction(self, day_to_compact: int) -> None:
+        """Phase H.6 — collapse yesterday's untagged memories.
+
+        Called once per NPC per game day, on the first tick of a
+        new day (so `day_to_compact` is always `current_day - 1`
+        and its memories are finalised). Routes each call through
+        `CognitionRouter.route(npc, "compaction")` — LLM verdict
+        yields a rich first-person summary, deterministic verdict
+        falls through to the heuristic string in
+        `core.memory.compaction`. One call max per (npc, day);
+        re-runs no-op thanks to tombstone filtering.
+
+        Week rollup hitches here too: when `day_to_compact` is the
+        last day of a week (day % 7 == 6), the method also rolls
+        up that week's 7 day_summaries into a week_summary. The
+        router is consulted separately for the week call so the
+        budget accounts for both.
+        """
+        if day_to_compact < 0:
+            return
+
+        from core.memory.compaction import DAYS_PER_WEEK
+        from core.npc.cognition.router import Route
+
+        for npc in self.npcs:
+            if self._skip_autonomous(npc):
+                continue
+            # Skip NPCs whose cognition is entirely frozen this tick —
+            # tier 4 means they're far from focus and we don't pay any
+            # per-tick cost on them; compaction follows the same rule.
+            if getattr(npc, "cognition_tier", 1) >= 4:
+                continue
+            if self._last_compacted_day.get(npc.npc_id, -1) >= day_to_compact:
+                continue
+
+            day_decision = self.router.route(
+                npc, "compaction",
+                focus_x=self.focus_x, focus_z=self.focus_z,
+            )
+            day_llm = self.llm if day_decision.route == Route.LLM else None
+            try:
+                await self.memory.compact_day(
+                    npc.npc_id, day_to_compact,
+                    npc=npc, llm=day_llm,
+                )
+            except Exception:
+                logger.exception(
+                    "compact_day failed for %s day %d",
+                    npc.npc_id, day_to_compact,
+                )
+            self._last_compacted_day[npc.npc_id] = day_to_compact
+
+            # Week rollup when this is the tail day of a week (0-6,
+            # 7-13, …). Index arithmetic: day % 7 == 6 → week ended.
+            if day_to_compact % DAYS_PER_WEEK == DAYS_PER_WEEK - 1:
+                week_to_compact = day_to_compact // DAYS_PER_WEEK
+                if self._last_compacted_week.get(
+                    npc.npc_id, -1,
+                ) >= week_to_compact:
+                    continue
+                week_decision = self.router.route(
+                    npc, "compaction",
+                    focus_x=self.focus_x, focus_z=self.focus_z,
+                )
+                week_llm = (
+                    self.llm if week_decision.route == Route.LLM else None
+                )
+                try:
+                    await self.memory.compact_week(
+                        npc.npc_id, week_to_compact,
+                        npc=npc, llm=week_llm,
+                    )
+                except Exception:
+                    logger.exception(
+                        "compact_week failed for %s week %d",
+                        npc.npc_id, week_to_compact,
+                    )
+                self._last_compacted_week[npc.npc_id] = week_to_compact
+
+    async def _run_daily_self_review(self, day_to_review: int) -> None:
+        """Phase I.1 — bedtime commitment review.
+
+        Called once per NPC per game day, immediately after
+        `_run_daily_compaction` on the first tick of a new day. For
+        each autonomous non-frozen NPC:
+
+        - Skip if the cursor says we've already reviewed this day.
+        - Ask the router for a routing verdict on `self_review`. The
+          default policy routes it to LLM unconditionally; users who
+          swap in a budget-tight policy will land back in AUTO or
+          DETERMINISTIC and fall through to the heuristic summary.
+        - Run `memory.daily_self_review`; on success, inject any
+          returned `ActionIntent` into tomorrow's schedule via the
+          same path reflection-driven intents already use.
+
+        Idempotent — the cursor guard makes re-runs a no-op.
+        """
+        if day_to_review < 0:
+            return
+
+        from core.npc.cognition.router import Route
+
+        for npc in self.npcs:
+            if self._skip_autonomous(npc):
+                continue
+            if getattr(npc, "cognition_tier", 1) >= 4:
+                continue
+            if self._last_self_reviewed_day.get(
+                npc.npc_id, -1,
+            ) >= day_to_review:
+                continue
+
+            decision = self.router.route(
+                npc, "self_review",
+                focus_x=self.focus_x, focus_z=self.focus_z,
+            )
+            review_llm = self.llm if decision.route == Route.LLM else None
+            try:
+                result = await self.memory.daily_self_review(
+                    npc.npc_id, day_to_review,
+                    npc=npc, llm=review_llm,
+                )
+            except Exception:
+                logger.exception(
+                    "daily_self_review failed for %s day %d",
+                    npc.npc_id, day_to_review,
+                )
+                result = None
+
+            self._last_self_reviewed_day[npc.npc_id] = day_to_review
+
+            if result is not None and result.action_intent is not None:
+                self._inject_reflection_entry(npc, result.action_intent)
 
     async def _run_overseer_eval(
         self, current_day: int, current_minutes: float,
@@ -1622,13 +2188,75 @@ class NPCManager:
             return 0.0
         return sum(scores) / len(scores)
 
+    def _on_goal_proposed(self, goal) -> None:
+        """Phase F.1 — seed every NPC with awareness of a new town goal.
+
+        The sidebar already shows the goal; now each NPC also holds
+        an episodic memory of having heard about it, so retrieval and
+        prompt injection can surface it in plan/converse/reflect.
+        Importance 0.6 lands above perception noise but below personal
+        commitments (0.7) and completion events (0.8).
+        """
+        description = (
+            f"The town has proposed a new initiative: \"{goal.title}\" — "
+            f"{goal.description} Needs {goal.required_contributions} "
+            f"contributions by day {goal.deadline_day}."
+        )
+        for npc in self.npcs:
+            try:
+                self.memory.record_town_event_memory(
+                    npc_id=npc.npc_id,
+                    description=description,
+                    category="town_agenda",
+                    importance=0.6,
+                    game_time=self._current_minutes,
+                    goal_id=goal.goal_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to seed propose memory for %s on %s",
+                    npc.name, goal.goal_id,
+                )
+        logger.info(
+            "AGENDA propose: '%s' seeded to %d NPCs",
+            goal.title, len(self.npcs),
+        )
+
+    def _on_goal_expired(self, goal) -> None:
+        """Phase F.4 — record the town's disappointment when a goal
+        lapses without completing. Lands for every NPC so the memory
+        of a failed initiative colours subsequent planning/chat.
+        """
+        description = (
+            f"The town initiative \"{goal.title}\" was not completed in "
+            f"time — {goal.progress}/{goal.required_contributions} "
+            f"contributions by day {goal.deadline_day}. "
+            f"It has been shelved."
+        )
+        for npc in self.npcs:
+            try:
+                self.memory.record_town_event_memory(
+                    npc_id=npc.npc_id,
+                    description=description,
+                    category="town_failure",
+                    importance=0.6,
+                    game_time=self._current_minutes,
+                    goal_id=goal.goal_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to seed expire memory for %s on %s",
+                    npc.name, goal.goal_id,
+                )
+        logger.info("AGENDA expire: '%s' recorded as failure", goal.title)
+
     def _on_goal_completed(self, goal) -> None:
         """Callback: record a town event when a goal completes.
 
         Fires a data-driven event through the existing impact system
-        so sentiment and narrative ripples naturally. Gives completed
-        goals a lasting mark on the town rather than just clearing
-        from the agenda.
+        so sentiment and narrative ripples naturally, AND seeds
+        per-NPC episodic memory (Phase F.3) so contributors remember
+        the shared victory and bystanders remember the news.
         """
         try:
             self.events.process_event(GameEvent(
@@ -1644,6 +2272,60 @@ class NPCManager:
             )
         except Exception:
             logger.exception("Failed to fire town_goal_completed event")
+
+        # Build contributor name list so memories read naturally
+        # ("with Alice, Bran, and Petra") instead of by npc_id.
+        contributor_names = []
+        for npc_id in goal.contributors:
+            n = self.get_npc(npc_id)
+            if n is not None:
+                contributor_names.append(n.name)
+        contributors_phrase = (
+            ", ".join(contributor_names) if contributor_names else "others"
+        )
+
+        contributor_description = (
+            f"We completed the town initiative \"{goal.title}\" together "
+            f"with {contributors_phrase}."
+        )
+        bystander_description = (
+            f"The town initiative \"{goal.title}\" was completed by "
+            f"{contributors_phrase}."
+        )
+
+        for npc in self.npcs:
+            was_contributor = npc.npc_id in goal.contributors
+            try:
+                self.memory.record_town_event_memory(
+                    npc_id=npc.npc_id,
+                    description=(
+                        contributor_description if was_contributor
+                        else bystander_description
+                    ),
+                    category="town_event",
+                    importance=0.8 if was_contributor else 0.5,
+                    game_time=self._current_minutes,
+                    goal_id=goal.goal_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to seed completion memory for %s on %s",
+                    npc.name, goal.goal_id,
+                )
+
+            # Phase I.4 — reinforce contributor self_concept. Bystanders
+            # get the news (town_event memory above) but not the
+            # identity bump; the delta is earned by showing up.
+            if was_contributor:
+                try:
+                    apply_identity_reinforcement(
+                        self.memory, npc, goal, self._current_minutes,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to apply identity reinforcement for %s on %s",
+                        npc.name, goal.goal_id,
+                    )
 
     def _build_tick_state(self) -> dict[str, Any]:
         """Build the NPC state update for WebSocket broadcast."""

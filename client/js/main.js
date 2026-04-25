@@ -1,8 +1,9 @@
 /**
  * Smallville 2 — Main client entry point.
  *
- * Initialises Three.js scene, WebSocket connection, and game loop.
- * All game logic is server-side; this is a thin renderer.
+ * Initialises Three.js scene, WebSocket connection, player controls,
+ * chat, trade, HUD, and game loop. All game logic is server-side;
+ * this is a thin renderer + input handler.
  */
 
 import * as THREE from 'three';
@@ -10,6 +11,10 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { WorldRenderer } from './world_renderer.js';
 import { NPCRenderer } from './npc_renderer.js';
 import { MemoryInspector } from './memory_inspector.js';
+import { PlayerControls } from './player_controls.js';
+import { ChatUI } from './chat_ui.js';
+import { TradeUI } from './trade_ui.js';
+import { HUD } from './hud.js';
 
 // ---------- Three.js Setup ----------
 
@@ -58,17 +63,27 @@ scene.add(sunLight);
 const worldRenderer = new WorldRenderer(scene);
 const npcRenderer = new NPCRenderer(scene);
 let worldLoaded = false;
+let buildingsCache = null;
 
 // ---------- HUD ----------
 
-const hudTime = document.getElementById('hud-time');
-const hudGold = document.getElementById('hud-gold');
-const statusEl = document.getElementById('hud-status');
+const hud = new HUD();
 
-function updateHUD(timeData) {
-    if (!timeData) return;
-    hudTime.textContent = `Day ${timeData.day} — ${timeData.time} (${timeData.phase})`;
-}
+// ---------- Player Controls ----------
+
+const playerControls = new PlayerControls(scene, camera, sendMessage, npcRenderer);
+
+// ---------- Chat UI ----------
+
+const chatUI = new ChatUI(sendMessage, (isOpen) => {
+    playerControls.setChatOpen(isOpen);
+});
+
+// ---------- Trade UI ----------
+
+const tradeUI = new TradeUI(sendMessage, (isOpen) => {
+    playerControls.setChatOpen(isOpen);  // Reuse — blocks movement while trading
+});
 
 // ---------- Memory Inspector ----------
 
@@ -83,24 +98,25 @@ function connectWebSocket() {
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
     ws.onopen = () => {
-        statusEl.textContent = 'Connected';
-        statusEl.style.color = '#44ff44';
+        hud.setStatus('Connected', '#44ff44');
     };
 
     ws.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        handleServerMessage(message);
+        try {
+            const message = JSON.parse(event.data);
+            handleServerMessage(message);
+        } catch (err) {
+            console.error('Message handler error:', err);
+        }
     };
 
     ws.onclose = () => {
-        statusEl.textContent = 'Disconnected — reconnecting...';
-        statusEl.style.color = '#ff4444';
+        hud.setStatus('Disconnected — reconnecting...', '#ff4444');
         setTimeout(connectWebSocket, 2000);
     };
 
     ws.onerror = () => {
-        statusEl.textContent = 'Connection error';
-        statusEl.style.color = '#ff4444';
+        hud.setStatus('Connection error', '#ff4444');
     };
 }
 
@@ -111,17 +127,28 @@ function handleServerMessage(message) {
             if (message.world) {
                 worldRenderer.buildWorld(message.world, message.buildings);
                 worldLoaded = true;
+                buildingsCache = message.buildings;
+                if (message.world.width) {
+                    hud.setWorldSize(message.world.width, message.world.height);
+                }
             }
             if (message.time) {
-                updateHUD(message.time);
+                hud.updateTime(message.time);
                 WorldRenderer.updateLighting(sunLight, ambientLight, scene, message.time);
                 worldRenderer.updateLamps(message.time.phase);
             }
             if (message.npcs && message.npcs.length > 0) {
                 npcRenderer.updateNPCs(message.npcs);
                 console.log(`Loaded ${message.npcs.length} NPCs`);
-            } else {
-                console.warn('WARNING: init message has no NPC data — server may be running stale code');
+            }
+            // Activate player if present
+            if (message.player) {
+                playerControls.activate(message.player.x, message.player.z);
+                hud.updatePlayerStats(message.player);
+                hud.notify('Welcome to Smallville! Use WASD to move.', 'info');
+
+                // Disable orbit controls — PlayerControls handles zoom via scroll
+                controls.enabled = false;
             }
             break;
 
@@ -129,9 +156,10 @@ function handleServerMessage(message) {
             if (message.world && !worldLoaded) {
                 worldRenderer.buildWorld(message.world, message.buildings);
                 worldLoaded = true;
+                buildingsCache = message.buildings;
             }
             if (message.time) {
-                updateHUD(message.time);
+                hud.updateTime(message.time);
                 WorldRenderer.updateLighting(sunLight, ambientLight, scene, message.time);
                 worldRenderer.updateLamps(message.time.phase);
             }
@@ -142,28 +170,75 @@ function handleServerMessage(message) {
 
         case 'tick':
             if (message.time) {
-                updateHUD(message.time);
+                hud.updateTime(message.time);
                 WorldRenderer.updateLighting(sunLight, ambientLight, scene, message.time);
                 worldRenderer.updateLamps(message.time.phase);
             }
             if (message.npcs) {
                 npcRenderer.updateNPCs(message.npcs);
+                playerControls.updateNearbyNpcs(message.npcs);
+
+                // Update nearby NPC list for chat/trade
+                const nearbyIds = playerControls.getNearbyNpcIds();
+                const nearbyNpcs = message.npcs
+                    .filter(n => nearbyIds.has(n.npc_id))
+                    .sort((a, b) => {
+                        const da = Math.abs(a.x - playerControls.playerX) + Math.abs(a.z - playerControls.playerZ);
+                        const db = Math.abs(b.x - playerControls.playerX) + Math.abs(b.z - playerControls.playerZ);
+                        return da - db;
+                    });
+                chatUI.setNearbyNpcs(nearbyNpcs);
+                tradeUI.setNearbyNpcs(nearbyNpcs);
+                hud.updateNearbyNpcs(nearbyNpcs);
+            }
+            if (message.player) {
+                playerControls.updateFromServer(message.player);
+                hud.updatePlayerStats(message.player);
+                tradeUI.updatePlayerState(message.player);
+                hud.updateMinimap(message.npcs, message.player, buildingsCache);
+            }
+            if (message.conversations) {
+                chatUI.handleConversationUpdate(message.conversations);
+            }
+            if (message.town_agenda) {
+                hud.updateTownAgenda(message.town_agenda);
+            }
+            if (message.memory_events) {
+                for (const evt of message.memory_events) {
+                    npcRenderer.flashMemory(
+                        evt.npc_id, evt.importance, evt.category,
+                    );
+                    hud.recordMemoryEvent(evt);
+                }
             }
             break;
 
         case 'chat_response':
-            // TODO: Display in chat panel
+            chatUI.handleResponse(message);
+            break;
+
+        case 'trade_response':
+            tradeUI.handleResponse(message);
             break;
 
         case 'event':
-            // TODO: Show notifications
+            if (message.events) {
+                for (const evt of message.events) {
+                    hud.notify(evt.description || evt.type, 'event');
+                }
+            }
             break;
 
         case 'pong':
             break;
 
         default:
-            console.warn('Unknown message type:', message.type);
+            // Memory inspector and other handlers
+            if (message.type === 'memory_data' || message.type === 'memory_stats') {
+                // Memory inspector handles these internally
+            } else {
+                console.warn('Unknown message type:', message.type);
+            }
     }
 }
 
@@ -176,24 +251,49 @@ function sendMessage(message) {
 // ---------- Input Handling ----------
 
 document.addEventListener('keydown', (event) => {
+    // Don't capture when typing
+    if (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA') return;
+    // Don't steal key events while the thinking-level <select> is focused.
+    if (event.target.tagName === 'SELECT') return;
+
     // Memory Inspector toggle
     if (event.code === 'KeyM' && !event.ctrlKey && !event.metaKey) {
         memoryInspector.toggle();
         return;
     }
-
-    const directionMap = {
-        'ArrowUp': 'north', 'KeyW': 'north',
-        'ArrowDown': 'south', 'KeyS': 'south',
-        'ArrowLeft': 'west', 'KeyA': 'west',
-        'ArrowRight': 'east', 'KeyD': 'east',
-    };
-
-    const direction = directionMap[event.code];
-    if (direction) {
-        sendMessage({ type: 'move', direction });
-    }
 });
+
+// ---------- Thinking-level toggle ----------
+
+const thinkingSelect = document.getElementById('hud-thinking-level');
+if (thinkingSelect) {
+    // Persist choice across page reloads.
+    const saved = localStorage.getItem('smallville.thinking_level');
+    if (saved && ['fast', 'balanced', 'deep'].includes(saved)) {
+        thinkingSelect.value = saved;
+    }
+    const sendLevel = (lvl) => sendMessage({ type: 'set_thinking_level', level: lvl });
+
+    thinkingSelect.addEventListener('change', (e) => {
+        const level = e.target.value;
+        localStorage.setItem('smallville.thinking_level', level);
+        sendLevel(level);
+        hud.notify(`NPC thinking: ${level}`, 'info');
+    });
+
+    // Push the saved preference to the server once the socket opens.
+    const origOnOpen = () => sendLevel(thinkingSelect.value);
+    // connectWebSocket installs ws.onopen itself; attach a one-shot sync
+    // after the initial connect.
+    const syncWhenOpen = () => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            origOnOpen();
+        } else {
+            setTimeout(syncWhenOpen, 200);
+        }
+    };
+    setTimeout(syncWhenOpen, 500);
+}
 
 // ---------- Game Loop ----------
 
@@ -201,10 +301,22 @@ const clock = new THREE.Clock();
 
 function animate() {
     requestAnimationFrame(animate);
-    const delta = clock.getDelta();
-    controls.update();
-    npcRenderer.animate(delta);
-    renderer.render(scene, camera);
+    try {
+        const delta = clock.getDelta();
+
+        // Player controls update (sends movement, smooths camera)
+        playerControls.update(delta);
+
+        // Orbit controls only if player not following
+        if (!playerControls.cameraFollowing || !playerControls.active) {
+            controls.update();
+        }
+
+        npcRenderer.animate(delta);
+        renderer.render(scene, camera);
+    } catch (err) {
+        console.error('Animate loop error:', err);
+    }
 }
 
 // ---------- Window Resize ----------

@@ -271,7 +271,7 @@ def _find_npc_name(events: list[dict], npc_id: str) -> str:
 def main():
     if not LOG_PATH.exists():
         print(f"ERROR: Log file not found: {LOG_PATH}")
-        print("Run test_instrumented_sim.py first.")
+        print("Run diagnostic_instrumented_sim.py first.")
         sys.exit(1)
 
     events = load_events(LOG_PATH)

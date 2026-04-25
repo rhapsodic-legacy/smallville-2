@@ -29,6 +29,16 @@ logger = logging.getLogger(__name__)
 # Seconds of real time before we consider an NPC stuck
 STUCK_TIMEOUT = 5.0
 
+# Tiles claimed by NPCs arriving in the current movement_tick.
+# Prevents same-tick arrivals from landing on the same tile.
+# Cleared each tick by clear_arrival_claims().
+_arrived_this_tick: set[tuple[int, int]] = set()
+
+
+def clear_arrival_claims() -> None:
+    """Reset the per-tick arrival claims. Call once per movement_tick."""
+    _arrived_this_tick.clear()
+
 
 _ACTIVITY_STATE_MAP = {
     "idle": ActivityState.IDLE,
@@ -255,13 +265,20 @@ def _arrive(
     When nudged to a free tile, persist that position on the current
     schedule entry so future re-dispatches (post-conversation, etc.)
     don't send the NPC back to the original occupied tile.
+
+    Uses a module-level set (_arrived_this_tick) so that when multiple
+    NPCs arrive in the same movement_tick loop, later arrivals see
+    tiles claimed by earlier arrivals. The set is cleared each tick
+    by calling clear_arrival_claims().
     """
     from core.world.spatial_awareness import get_occupied_tiles, find_rest_tile
 
     _clear_path(npc)
 
-    # Nudge to free tile if occupied — add trail so client animates
-    occupied = get_occupied_tiles(all_npcs)
+    # Build occupied set: resting NPCs + tiles claimed by earlier
+    # arrivals in this same tick
+    occupied = get_occupied_tiles(all_npcs) | _arrived_this_tick
+
     if (npc.tile_x, npc.tile_z) in occupied:
         new_x, new_z = find_rest_tile(
             npc.tile_x, npc.tile_z, grid, occupied,
@@ -271,6 +288,9 @@ def _arrive(
             npc._tick_trail = [(new_x, new_z)]
             npc.x = float(new_x)
             npc.z = float(new_z)
+
+    # Record this tile so later arrivals in the same tick see it
+    _arrived_this_tick.add((npc.tile_x, npc.tile_z))
 
     # Persist final position on current schedule entry so re-dispatches
     # (post-conversation, advance) use the resolved tile, not the original.

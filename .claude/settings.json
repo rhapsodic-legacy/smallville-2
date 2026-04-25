@@ -1,0 +1,61 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": {
+          "tools": ["Edit", "Write"]
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport sys, os\npath = os.environ.get('TOOL_INPUT_FILE_PATH', os.environ.get('TOOL_INPUT_file_path', ''))\nif path.endswith('.py'):\n    import py_compile\n    try:\n        py_compile.compile(path, doraise=True)\n        print(f'Syntax OK: {path}')\n    except py_compile.PyCompileError as e:\n        print(f'SYNTAX ERROR: {e}', file=sys.stderr)\n        sys.exit(1)\n\""
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tools": ["Edit", "Write"]
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport os\npath = os.environ.get('TOOL_INPUT_FILE_PATH', os.environ.get('TOOL_INPUT_file_path', ''))\nif path.endswith(('.py', '.js')):\n    with open(path) as f:\n        lines = f.readlines()\n    count = len(lines)\n    if count > 750:\n        print(f'FILE TOO LONG: {path} has {count} lines (max 750)', file=__import__('sys').stderr)\n        __import__('sys').exit(1)\n    elif count > 500:\n        print(f'WARNING: {path} has {count} lines (target <500, max 750)')\n\""
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tools": ["Edit", "Write"]
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport os, subprocess, sys\npath = os.environ.get('TOOL_INPUT_FILE_PATH', os.environ.get('TOOL_INPUT_file_path', ''))\nspatial_files = ['spatial_awareness.py', 'execute.py', 'converse.py', 'manager.py']\nif any(path.endswith(f) for f in spatial_files):\n    result = subprocess.run([sys.executable, 'tests/check_spatial_integrity.py'], capture_output=True, text=True)\n    print(result.stdout)\n    if result.returncode != 0:\n        print(result.stderr, file=sys.stderr)\n        sys.exit(1)\n\""
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tools": ["Edit", "Write"]
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport os, subprocess, sys\npath = os.environ.get('TOOL_INPUT_FILE_PATH', os.environ.get('TOOL_INPUT_file_path', ''))\ntrigger_files = ['pathfinding.py', 'generator.py', 'spatial_awareness.py', 'execute.py', 'npc_renderer.js', 'manager.py']\nif any(path.endswith(f) for f in trigger_files):\n    # Run unit-level movement tests\n    r1 = subprocess.run([sys.executable, 'tests/simulation/test_npc_movement.py'], capture_output=True, text=True, timeout=60)\n    print(r1.stdout[-1500:] if len(r1.stdout) > 1500 else r1.stdout)\n    if r1.returncode != 0:\n        print('MOVEMENT UNIT TESTS FAILED', file=sys.stderr)\n        sys.exit(1)\n    # Run live simulation (300 ticks, observes actual NPC behaviour)\n    r2 = subprocess.run([sys.executable, 'tests/simulation/test_live_simulation.py'], capture_output=True, text=True, timeout=120)\n    print(r2.stdout[-1500:] if len(r2.stdout) > 1500 else r2.stdout)\n    if r2.returncode != 0:\n        print('LIVE SIMULATION FAILED', file=sys.stderr)\n        sys.exit(1)\n\""
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tools": ["Edit", "Write"]
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -c \"\nimport os, subprocess, sys\npath = os.environ.get('TOOL_INPUT_FILE_PATH', os.environ.get('TOOL_INPUT_file_path', ''))\ntrigger_files = ['decompose.py', 'execute.py', 'manager.py', 'models.py', 'llm_client.py']\nif any(path.endswith(f) for f in trigger_files):\n    r = subprocess.run([sys.executable, 'tests/simulation/test_npc_intelligence.py'], capture_output=True, text=True, timeout=120)\n    print(r.stdout[-1500:] if len(r.stdout) > 1500 else r.stdout)\n    if r.returncode != 0:\n        print('INTELLIGENCE TESTS FAILED', file=sys.stderr)\n        sys.exit(1)\n\""
+          }
+        ]
+      }
+    ]
+  }
+}

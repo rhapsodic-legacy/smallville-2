@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_DB_PATH = Path("data/relationships.db")
 
 # Dimension names used throughout the system
-DIMENSIONS = ("trust", "fear", "respect", "affection", "debt")
+DIMENSIONS = ("trust", "fear", "respect", "affection", "debt", "resonance")
 
 # Absolute caps to prevent runaway values
 DIMENSION_MIN = -100.0
@@ -47,6 +47,7 @@ class Sentiment:
     respect: float = 0.0
     affection: float = 0.0
     debt: float = 0.0
+    resonance: float = 0.0  # kinship from shared interests/occupation
     updated_at: float = 0.0
 
     def get(self, dimension: str) -> float:
@@ -157,6 +158,7 @@ class SentimentTracker:
                 respect     REAL DEFAULT 0,
                 affection   REAL DEFAULT 0,
                 debt        REAL DEFAULT 0,
+                resonance   REAL DEFAULT 0,
                 updated_at  REAL DEFAULT 0,
                 PRIMARY KEY (npc_from, npc_to)
             )
@@ -200,14 +202,15 @@ class SentimentTracker:
 
         self.conn.execute(
             "INSERT INTO sentiments (npc_from, npc_to, trust, fear, respect, "
-            "affection, debt, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "affection, debt, resonance, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(npc_from, npc_to) DO UPDATE SET "
             "trust=excluded.trust, fear=excluded.fear, respect=excluded.respect, "
             "affection=excluded.affection, debt=excluded.debt, "
-            "updated_at=excluded.updated_at",
+            "resonance=excluded.resonance, updated_at=excluded.updated_at",
             (sentiment.npc_from, sentiment.npc_to, sentiment.trust,
              sentiment.fear, sentiment.respect, sentiment.affection,
-             sentiment.debt, sentiment.updated_at),
+             sentiment.debt, sentiment.resonance, sentiment.updated_at),
         )
         self.conn.commit()
 
@@ -271,6 +274,45 @@ class SentimentTracker:
         all_rels.sort(key=lambda s: abs(s.overall_disposition()), reverse=True)
         return all_rels[:limit]
 
+    def decay_all(
+        self,
+        elapsed_game_minutes: float,
+        rate_per_day: float = 0.02,
+    ) -> int:
+        """Drift all non-zero sentiment dimensions toward zero.
+
+        Called once per game-day. Each dimension loses
+        ``abs(value) * rate_per_day`` per day, so strong feelings
+        decay faster in absolute terms but the *proportion* is constant.
+        At 2 % per day a value of 50 takes ~35 days to halve — slow enough
+        that active relationships easily outpace decay, but neglected ones
+        fade over a few in-game weeks.
+
+        Returns the number of relationships updated.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM sentiments",
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            s = self._row_to_sentiment(row)
+            changed = False
+            for dim in DIMENSIONS:
+                val = s.get(dim)
+                if abs(val) < 0.01:
+                    continue
+                # Shrink toward zero
+                reduction = abs(val) * rate_per_day
+                if val > 0:
+                    s.set(dim, val - reduction)
+                else:
+                    s.set(dim, val + reduction)
+                changed = True
+            if changed:
+                self.set(s, s.updated_at)
+                updated += 1
+        return updated
+
     def get_stats(self) -> dict[str, Any]:
         """Summary statistics for UI inspector."""
         count = self.conn.execute(
@@ -294,6 +336,7 @@ class SentimentTracker:
             respect=row["respect"],
             affection=row["affection"],
             debt=row["debt"],
+            resonance=row["resonance"],
             updated_at=row["updated_at"],
         )
 

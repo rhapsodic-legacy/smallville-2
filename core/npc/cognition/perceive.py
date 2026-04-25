@@ -4,6 +4,10 @@ Perception module.
 NPCs observe their surroundings: nearby NPCs, objects, events, and terrain.
 Perception is filtered by vision radius and attention bandwidth.
 A retention window prevents re-perceiving the same things repeatedly.
+
+Importance scoring is relationship-aware: seeing someone you care about
+(or fear) is weighted higher so that reflections and replanning are
+triggered by socially meaningful events, not just proximity.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.npc.models import NPC
+    from core.relationships.sentiment import SentimentTracker
     from core.world.grid import Grid
 
 logger = logging.getLogger(__name__)
@@ -27,6 +32,16 @@ MAX_RECENT_PERCEPTIONS = 20
 # How many new observations per perception cycle
 ATTENTION_BANDWIDTH = {1: 8, 2: 4, 3: 2, 4: 0}
 
+# Keywords in object/event descriptions that signal high importance
+_HIGH_IMPORTANCE_KEYWORDS = frozenset({
+    "fire", "attack", "fight", "collapse", "scream", "blood",
+    "danger", "theft", "dead", "injured", "wounded", "broken",
+})
+_MODERATE_IMPORTANCE_KEYWORDS = frozenset({
+    "trade", "gold", "feast", "festival", "construction", "harvest",
+    "argument", "dispute", "crowd", "unusual", "rare", "stranger",
+})
+
 
 @dataclass
 class Observation:
@@ -36,6 +51,7 @@ class Observation:
     x: int
     z: int
     importance: float  # 0.0–1.0 estimated importance
+    subject_npc_id: str = ""  # ID of perceived NPC, if category == "npc"
 
 
 def perceive(
@@ -43,6 +59,7 @@ def perceive(
     grid: Grid,
     all_npcs: list[NPC],
     current_game_minutes: float,
+    sentiment: SentimentTracker | None = None,
 ) -> list[Observation]:
     """
     Run the perception cycle for an NPC.
@@ -70,7 +87,8 @@ def perceive(
                 description=desc,
                 category="npc",
                 x=other.x, z=other.z,
-                importance=_npc_importance(npc, other),
+                importance=_npc_importance(npc, other, sentiment),
+                subject_npc_id=other.npc_id,
             ))
 
     # Perceive nearby objects
@@ -84,7 +102,7 @@ def perceive(
                 description=desc,
                 category="object",
                 x=tile.x, z=tile.z,
-                importance=0.2,
+                importance=_object_importance(desc),
             ))
 
     # Sort by importance and limit to attention bandwidth
@@ -130,8 +148,17 @@ def _describe_npc(other: NPC) -> str:
     return f"{other.name} the {other.occupation} is {activity} nearby"
 
 
-def _npc_importance(npc: NPC, other: NPC) -> float:
-    """Estimate how important another NPC is to perceive."""
+def _npc_importance(
+    npc: NPC,
+    other: NPC,
+    sentiment: SentimentTracker | None = None,
+) -> float:
+    """Estimate how important another NPC is to perceive.
+
+    Factors: proximity, activity, shared occupation, and relationship
+    strength (sentiment). Strong feelings — positive or negative —
+    make the other NPC more salient.
+    """
     importance = 0.3  # base
 
     # Closer NPCs are more important
@@ -149,4 +176,23 @@ def _npc_importance(npc: NPC, other: NPC) -> float:
     if other.occupation == npc.occupation:
         importance += 0.1
 
+    # Relationship salience — strong feelings (love OR hate) grab attention
+    if sentiment is not None:
+        sent = sentiment.get(npc.npc_id, other.npc_id)
+        disposition = abs(sent.overall_disposition())
+        # Scale: disposition 0-100 → bonus 0-0.3
+        importance += min(0.3, disposition / 100 * 0.3)
+
     return min(1.0, importance)
+
+
+def _object_importance(description: str) -> float:
+    """Score object/event importance using keyword heuristics."""
+    desc_lower = description.lower()
+    words = set(desc_lower.split())
+
+    if words & _HIGH_IMPORTANCE_KEYWORDS:
+        return 0.8
+    if words & _MODERATE_IMPORTANCE_KEYWORDS:
+        return 0.5
+    return 0.2

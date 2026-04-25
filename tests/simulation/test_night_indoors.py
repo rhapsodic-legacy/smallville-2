@@ -16,6 +16,7 @@ from core.npc.manager import NPCManager
 from core.npc.models import ActivityState
 from core.npc.llm_client import MockProvider
 from core.memory.manager import MemoryManager
+from core.memory.episodic import EpisodicStore
 from core.time_system.clock import GameClock
 from core.world.generator import (
     WorldConfig,
@@ -36,7 +37,8 @@ def world():
 def manager(world):
     grid, buildings = world
     llm = MockProvider()
-    memory = MemoryManager(llm=llm)
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
     mgr = NPCManager(
         grid=grid,
         buildings=buildings,
@@ -57,7 +59,7 @@ def _advance_to_slot(manager: NPCManager, clock: GameClock, target_slot: str):
             if clock.schedule_slot.value == target_slot:
                 return
         raise TimeoutError(f"Never reached slot '{target_slot}'")
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.new_event_loop().run_until_complete(_run())
 
 
 def _run_ticks(manager: NPCManager, clock: GameClock, n: int):
@@ -66,7 +68,7 @@ def _run_ticks(manager: NPCManager, clock: GameClock, n: int):
         for _ in range(n):
             clock.tick(1.0)
             await manager.tick(clock, 1.0)
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.new_event_loop().run_until_complete(_run())
 
 
 def _get_all_interior_tiles(buildings: list[PlacedBuilding]) -> set[tuple[int, int]]:
@@ -154,7 +156,7 @@ class TestSleepingIndoors:
                             f"({npc.tile_x},{npc.tile_z})"
                         )
 
-        asyncio.get_event_loop().run_until_complete(_sample())
+        asyncio.new_event_loop().run_until_complete(_sample())
 
         # Deduplicate by NPC
         unique_npcs = set()

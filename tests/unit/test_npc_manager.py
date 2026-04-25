@@ -92,11 +92,11 @@ class TestMovementVariation:
     def test_move_speed_within_range(self, manager):
         npcs = manager.spawn_population(10)
         for npc in npcs:
-            assert 1.6 <= npc.move_speed <= 2.4
+            assert 2.0 <= npc.move_speed <= 4.0
 
-    @pytest.mark.asyncio
-    async def test_action_advance_dispatches_immediately(self, manager):
+    def test_action_advance_dispatches_immediately(self, manager):
         """Advancing to next action should dispatch NPCs immediately (Stanford model)."""
+        import asyncio
         npcs = manager.spawn_population(3)
         from core.npc.models import ScheduleEntry, ActivityState
         for npc in npcs:
@@ -106,17 +106,18 @@ class TestMovementVariation:
             ]
             npc.schedule_index = 0
             npc.action_start_minutes = 0.0
+        loop = asyncio.new_event_loop()
         # Advance each NPC to the second entry
         for npc in npcs:
-            await manager._advance_npc_action(npc, 60.0, "morning")
+            loop.run_until_complete(manager._advance_npc_action(npc, 60.0, "morning"))
         # NPCs should be walking or at destination — no stagger queue
         for npc in npcs:
             assert npc.schedule_index == 1
             assert npc.action_start_minutes == 60.0
 
-    @pytest.mark.asyncio
-    async def test_action_advance_updates_schedule_index(self, manager):
+    def test_action_advance_updates_schedule_index(self, manager):
         """Each advance should increment schedule_index and reset timer."""
+        import asyncio
         npcs = manager.spawn_population(1)
         from core.npc.models import ScheduleEntry
         npc = npcs[0]
@@ -127,9 +128,10 @@ class TestMovementVariation:
         ]
         npc.schedule_index = 0
         npc.action_start_minutes = 0.0
-        await manager._advance_npc_action(npc, 60.0, "morning")
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(manager._advance_npc_action(npc, 60.0, "morning"))
         assert npc.schedule_index == 1
-        await manager._advance_npc_action(npc, 300.0, "afternoon")
+        loop.run_until_complete(manager._advance_npc_action(npc, 300.0, "afternoon"))
         assert npc.schedule_index == 2
 
 
@@ -188,6 +190,287 @@ class TestSeedMemories:
             assert "Smallville" in descriptions
 
 
+class TestRelationshipSeeding:
+    """Verify inter-NPC relationships are seeded at spawn."""
+
+    def test_npcs_have_relationship_facts(self, manager):
+        """NPCs should know about other NPCs after spawning."""
+        npcs = manager.spawn_population(10)
+        # With 10 NPCs across various occupations, there should be
+        # occupational bonds + neighbours + acquaintances
+        total_rel_facts = 0
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=100)
+            rel_facts = [
+                f for f in facts
+                if f.predicate in (
+                    "trades_with", "supplies", "respects", "knows_well",
+                    "works_for", "neighbour_of", "knows",
+                )
+            ]
+            total_rel_facts += len(rel_facts)
+        assert total_rel_facts >= 5, (
+            f"Expected at least 5 relationship facts, got {total_rel_facts}"
+        )
+
+    def test_npcs_have_relationship_memories(self, manager):
+        """NPCs should have episodic memories about relationships."""
+        npcs = manager.spawn_population(10)
+        rel_memory_count = 0
+        for npc in npcs:
+            memories = manager.memory.episodic.get_recent(npc.npc_id, limit=100)
+            rel_memories = [
+                m for m in memories if m.category == "relationship"
+            ]
+            rel_memory_count += len(rel_memories)
+        assert rel_memory_count >= 5
+
+    def test_npcs_know_others_occupations(self, manager):
+        """NPCs with relationships should know the other's occupation."""
+        npcs = manager.spawn_population(10)
+        # Pick an NPC with relationship facts
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=100)
+            rel_facts = [
+                f for f in facts
+                if f.predicate in (
+                    "trades_with", "supplies", "knows_well",
+                    "works_for", "neighbour_of", "knows",
+                )
+            ]
+            if not rel_facts:
+                continue
+            # For each relationship, NPC should know the other's occupation
+            other_name = rel_facts[0].obj
+            about_facts = manager.memory.structured.get_facts_about(
+                npc.npc_id, about=other_name,
+            )
+            is_a = [f for f in about_facts if f.predicate == "is_a"]
+            assert len(is_a) >= 1, (
+                f"{npc.name} knows {other_name} but doesn't know their occupation"
+            )
+            return  # One successful check is enough
+        pytest.fail("No NPC had any relationship facts to test")
+
+    def test_initial_sentiment_seeded(self, manager):
+        """Occupational bonds should create initial sentiment values."""
+        npcs = manager.spawn_population(10)
+        # Find a pair with an occupational bond
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=100)
+            rel_facts = [
+                f for f in facts
+                if f.predicate in ("trades_with", "supplies", "respects")
+            ]
+            if not rel_facts:
+                continue
+            other_name = rel_facts[0].obj
+            other = next(
+                (n for n in npcs if n.name == other_name), None,
+            )
+            if other is None:
+                continue
+            s = manager.sentiment.get(npc.npc_id, other.npc_id)
+            # Should have non-zero trust or respect
+            assert s.trust > 0 or s.respect > 0, (
+                f"Expected positive sentiment from {npc.name} to {other.name}"
+            )
+            return
+        # If no occupational bonds were found (unlikely with 10 NPCs), skip
+        pytest.skip("No occupational bonds found in this seed")
+
+    def test_acquaintances_seeded(self, manager):
+        """Each NPC should know at least one other NPC."""
+        npcs = manager.spawn_population(10)
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=100)
+            knows_someone = any(
+                f.predicate in (
+                    "trades_with", "supplies", "respects", "knows_well",
+                    "works_for", "neighbour_of", "knows",
+                )
+                for f in facts
+            )
+            assert knows_someone, (
+                f"{npc.name} ({npc.occupation}) doesn't know anyone"
+            )
+
+    def test_neighbours_are_bidirectional(self, manager):
+        """If A is neighbour_of B, then B should be neighbour_of A."""
+        npcs = manager.spawn_population(10)
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=100)
+            neighbour_facts = [f for f in facts if f.predicate == "neighbour_of"]
+            for nf in neighbour_facts:
+                other_name = nf.obj
+                other = next((n for n in npcs if n.name == other_name), None)
+                if other is None:
+                    continue
+                other_facts = manager.memory.structured.get_facts(
+                    other.npc_id, limit=100,
+                )
+                reverse = [
+                    f for f in other_facts
+                    if f.predicate == "neighbour_of" and f.obj == npc.name
+                ]
+                assert len(reverse) >= 1, (
+                    f"{npc.name} is neighbour_of {other_name} but not vice versa"
+                )
+
+    def test_neighbour_distance_rule(self, manager):
+        """Neighbours should have homes within Manhattan distance 5."""
+        npcs = manager.spawn_population(10)
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=100)
+            neighbour_facts = [f for f in facts if f.predicate == "neighbour_of"]
+            for nf in neighbour_facts:
+                other = next(
+                    (n for n in npcs if n.name == nf.obj), None,
+                )
+                if other is None:
+                    continue
+                dist = abs(npc.home_x - other.home_x) + abs(npc.home_z - other.home_z)
+                assert dist <= 5, (
+                    f"{npc.name} and {other.name} are neighbours but "
+                    f"homes are {dist} tiles apart"
+                )
+
+    def test_initial_sentiment_values_match_bond(self, manager):
+        """Occupational bond sentiment should match OCCUPATIONAL_BONDS values."""
+        npcs = manager.spawn_population(10)
+        # Find a pair with trades_with — should have trust=15, respect=10
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=100)
+            trade_facts = [f for f in facts if f.predicate == "trades_with"]
+            if not trade_facts:
+                continue
+            other = next(
+                (n for n in npcs if n.name == trade_facts[0].obj), None,
+            )
+            if other is None:
+                continue
+            s = manager.sentiment.get(npc.npc_id, other.npc_id)
+            # trades_with: {"trust": 15, "respect": 10}
+            assert s.trust >= 10, f"Expected trust >= 10 for trade bond, got {s.trust}"
+            assert s.respect >= 5, f"Expected respect >= 5 for trade bond, got {s.respect}"
+            return
+        pytest.skip("No trades_with bond found")
+
+    def test_no_duplicate_relationships(self, manager):
+        """An NPC should not have duplicate relationship predicates for the same person."""
+        npcs = manager.spawn_population(10)
+        for npc in npcs:
+            facts = manager.memory.structured.get_facts(npc.npc_id, limit=200)
+            rel_predicates = [
+                "trades_with", "supplies", "respects", "knows_well",
+                "works_for", "neighbour_of", "knows",
+            ]
+            pairs = [
+                (f.predicate, f.obj) for f in facts if f.predicate in rel_predicates
+            ]
+            # Same (predicate, obj) should not appear twice
+            assert len(pairs) == len(set(pairs)), (
+                f"{npc.name} has duplicate relationship facts: {pairs}"
+            )
+
+
+class TestCustomSchedule:
+    def test_assign_custom_schedule(self, manager):
+        npcs = manager.spawn_population(3)
+        npc = npcs[0]
+        entries = [
+            {"activity": "guard the bridge", "location": "work",
+             "target_x": 15, "target_z": 0, "duration_minutes": 900},
+            {"activity": "sleep at home", "location": "home",
+             "duration_minutes": 540},
+        ]
+        ok, msg = manager.assign_custom_schedule(npc.npc_id, entries)
+        assert ok, msg
+        assert npc.has_custom_schedule is True
+        assert len(npc.daily_schedule) == 2
+        assert npc.schedule_index == 0
+
+    def test_reject_wrong_total(self, manager):
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        entries = [
+            {"activity": "guard", "location": "work", "duration_minutes": 500},
+        ]
+        ok, msg = manager.assign_custom_schedule(npc.npc_id, entries)
+        assert not ok
+        assert "1440" in msg
+
+    def test_reject_missing_activity(self, manager):
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        entries = [
+            {"location": "home", "duration_minutes": 1440},
+        ]
+        ok, msg = manager.assign_custom_schedule(npc.npc_id, entries)
+        assert not ok
+        assert "activity" in msg.lower()
+
+    def test_reject_empty_entries(self, manager):
+        npcs = manager.spawn_population(1)
+        ok, msg = manager.assign_custom_schedule(npcs[0].npc_id, [])
+        assert not ok
+
+    def test_reject_unknown_npc(self, manager):
+        manager.spawn_population(1)
+        ok, msg = manager.assign_custom_schedule("fake_id", [
+            {"activity": "idle", "duration_minutes": 1440},
+        ])
+        assert not ok
+
+    def test_clear_custom_schedule(self, manager):
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        entries = [
+            {"activity": "guard", "location": "work", "duration_minutes": 900},
+            {"activity": "sleep", "location": "home", "duration_minutes": 540},
+        ]
+        manager.assign_custom_schedule(npc.npc_id, entries)
+        ok, msg = manager.clear_custom_schedule(npc.npc_id)
+        assert ok
+        assert npc.has_custom_schedule is False
+        assert len(npc.daily_schedule) > 0  # template regenerated
+
+    def test_custom_schedule_loops(self, manager):
+        """When a custom schedule is exhausted, it should loop back to index 0."""
+        import asyncio
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        entries = [
+            {"activity": "guard", "location": "work", "duration_minutes": 900},
+            {"activity": "sleep", "location": "home", "duration_minutes": 540},
+        ]
+        manager.assign_custom_schedule(npc.npc_id, entries)
+        original_schedule = list(npc.daily_schedule)
+
+        # Walk to end of schedule
+        npc.schedule_index = 1
+        asyncio.new_event_loop().run_until_complete(
+            manager._advance_npc_action(npc, 1440.0, "night")
+        )
+
+        # Should loop: index reset, same schedule kept
+        assert npc.schedule_index == 0
+        assert npc.daily_schedule == original_schedule
+        assert npc.has_custom_schedule is True
+
+    def test_target_coords_preserved(self, manager):
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        entries = [
+            {"activity": "guard", "target_x": 15, "target_z": 7,
+             "duration_minutes": 1440},
+        ]
+        ok, _ = manager.assign_custom_schedule(npc.npc_id, entries)
+        assert ok
+        assert npc.daily_schedule[0].target_x == 15
+        assert npc.daily_schedule[0].target_z == 7
+
+
 class TestEmergencyOverrides:
     def test_force_navigate_all_moves_npcs(self, manager):
         """force_navigate_all should start all NPCs walking."""
@@ -236,6 +519,117 @@ class TestEmergencyOverrides:
                 # Destination should be away from (5, 5)
                 dist = abs(last[0] - 5) + abs(last[1] - 5)
                 assert dist > 3
+
+
+class TestScheduleRegenDispatch:
+    """Regression: NPCs stuck in houses after schedule exhaustion.
+
+    Root cause was action_start_minutes not reset to 0.0 on schedule
+    regen, so the first-dispatch logic never fires for the new schedule.
+    """
+
+    def test_schedule_exhaust_resets_action_timer(self, manager):
+        """After schedule exhaustion, action_start_minutes must be 0.0."""
+        import asyncio
+        from core.npc.models import ScheduleEntry
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        npc.daily_schedule = [
+            ScheduleEntry("morning", "work", "work", 5, duration_minutes=120),
+        ]
+        npc.schedule_index = 0
+        npc.action_start_minutes = 100.0
+
+        # Advance past the single entry — exhausts the schedule
+        asyncio.new_event_loop().run_until_complete(
+            manager._advance_npc_action(npc, 220.0, "morning")
+        )
+
+        assert npc.schedule_index == 0, "Schedule index should reset to 0"
+        assert npc.action_start_minutes == 0.0, (
+            "action_start_minutes must be 0.0 after schedule exhaustion "
+            "so first-dispatch logic fires on the next cognition tick"
+        )
+
+    def test_deterministic_regen_resets_action_timer(self, manager):
+        """Deterministic schedule regen must also reset to 0.0."""
+        import asyncio
+        from core.npc.models import ScheduleEntry
+        manager.deterministic = True
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        npc.daily_schedule = [
+            ScheduleEntry("morning", "work", "work", 5, duration_minutes=120),
+        ]
+        npc.schedule_index = 0
+        npc.action_start_minutes = 100.0
+
+        asyncio.new_event_loop().run_until_complete(
+            manager._advance_npc_action(npc, 220.0, "morning")
+        )
+
+        assert npc.action_start_minutes == 0.0, (
+            "Deterministic regen must also reset action_start_minutes to 0.0"
+        )
+
+    def test_normal_advance_keeps_current_minutes(self, manager):
+        """Normal advance (not exhaustion) should set current_minutes."""
+        import asyncio
+        from core.npc.models import ScheduleEntry
+        npcs = manager.spawn_population(1)
+        npc = npcs[0]
+        npc.daily_schedule = [
+            ScheduleEntry("morning", "eat", "home", 3, duration_minutes=60),
+            ScheduleEntry("morning", "work", "work", 5, duration_minutes=240),
+        ]
+        npc.schedule_index = 0
+        npc.action_start_minutes = 0.0
+
+        asyncio.new_event_loop().run_until_complete(
+            manager._advance_npc_action(npc, 60.0, "morning")
+        )
+
+        assert npc.schedule_index == 1
+        assert npc.action_start_minutes == 60.0, (
+            "Normal advance should anchor timer to current_minutes, not 0.0"
+        )
+
+
+class TestPlayerNPCFiltering:
+    """Regression: chat targeted the player themselves.
+
+    Root cause: player NPC in npc_manager.npcs is a plain NPC whose
+    to_dict() lacks is_player. Client filter checked is_player but it
+    was always undefined, so the player appeared as a nearby NPC.
+    """
+
+    def test_player_npc_identifiable_by_id(self, manager):
+        """Player NPC must be identifiable by npc_id='player'."""
+        npcs = manager.spawn_population(3)
+
+        from core.player.player_agent import PlayerAgent
+        player = PlayerAgent.create(name="Traveller", spawn_x=0, spawn_z=0)
+        manager.npcs.append(player.npc)
+        manager._npc_map[player.npc_id] = player.npc
+
+        # Simulate what the client does: filter nearby NPCs
+        all_npc_dicts = [npc.to_dict() for npc in manager.npcs]
+        non_player = [
+            d for d in all_npc_dicts
+            if d["npc_id"] != "player" and not d.get("is_player")
+        ]
+
+        assert len(non_player) == 3, (
+            f"Expected 3 non-player NPCs, got {len(non_player)}. "
+            "Player NPC must be filterable by npc_id='player'."
+        )
+
+    def test_player_npc_id_is_player(self):
+        """PlayerAgent always has npc_id='player'."""
+        from core.player.player_agent import PlayerAgent
+        player = PlayerAgent.create()
+        assert player.npc_id == "player"
+        assert player.npc.npc_id == "player"
 
     def test_force_navigate_npc(self, manager):
         """force_navigate_npc should move a specific NPC."""

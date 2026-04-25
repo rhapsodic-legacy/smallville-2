@@ -349,6 +349,7 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "Personality: {personality}\n"
         "{self_concept}\n"
         "Current goals: {goals}\n"
+        "{town_agenda}\n"
         "Current state — Health: {health}, Energy: {energy}, Hunger: {hunger}\n"
         "Gold: {gold}\n"
         "{relationship_summary}\n\n"
@@ -370,22 +371,40 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "You are {name}, a {age}-year-old {occupation} in Smallville.\n"
         "Personality: {personality}\n"
         "{self_concept}\n"
+        "{town_agenda}\n"
+        "{shared_agenda}\n"
+        "{unresolved_matters}\n"
         "{backstory}\n\n"
         "You have encountered {other_name} ({other_occupation}).\n"
         "{relationship_context}\n"
         "Recent observations: {recent_perceptions}\n\n"
         "Start a brief, natural conversation. Keep it to 1-2 sentences.\n"
-        "Stay in character."
+        "Stay in character. If you have open matters with this "
+        "person, this is a good time to raise them. If you share a "
+        "town initiative with them — working on it together or "
+        "recently completing it — mention it naturally; it's fresh "
+        "common ground. If this feels like a new encounter and you "
+        "know of a headline town matter, it's a natural opener."
     ),
 
     "conversation_respond": (
         "You are {name}, a {age}-year-old {occupation} in Smallville.\n"
         "Personality: {personality}\n"
-        "{self_concept}\n\n"
+        "{self_concept}\n"
+        "{town_agenda}\n"
+        "{shared_agenda}\n"
+        "{unresolved_matters}\n\n"
         "You are talking with {other_name} ({other_occupation}).\n"
         "{relationship_context}\n"
-        "{other_name} said: \"{other_message}\"\n\n"
-        "Respond naturally in 1-2 sentences. Stay in character."
+        "{recent_history}"
+        "{other_name} just said: \"{other_message}\"\n\n"
+        "Respond naturally in 1-2 sentences. Stay in character. "
+        "Stay on topic — reference what was said earlier in this "
+        "conversation when it's relevant; do NOT change subject "
+        "unless it makes clear sense. If you have an open matter "
+        "with this person that fits, work it into your reply. If "
+        "you share a town initiative with them, referencing it is "
+        "natural conversational glue."
     ),
 
     "reaction": (
@@ -439,6 +458,70 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "NO_CHANGE"
     ),
 
+    "day_summary": (
+        "You are {name}, a {occupation} in Smallville.\n"
+        "Personality: {personality}\n"
+        "{self_concept}\n"
+        "These are the smaller events of day {day}, the ones not "
+        "already lodged in your memory as promises, accusations, or "
+        "town matters:\n"
+        "{events}\n\n"
+        "Write a 2-4 sentence first-person recollection, as {name}, "
+        "covering:\n"
+        "1. What actually happened — the thread of the day, not a "
+        "list of every moment.\n"
+        "2. How it made you feel, in your voice.\n"
+        "3. Anything that shifted in how you see the people around "
+        "you or in what you mean to do next.\n\n"
+        "Skip trivial comings and goings. Do not restate events "
+        "verbatim. If the day was truly uneventful, say so in one "
+        "short sentence and stop."
+    ),
+
+    "week_summary": (
+        "You are {name}, a {occupation} in Smallville.\n"
+        "Personality: {personality}\n"
+        "{self_concept}\n"
+        "These are your own day-by-day recollections from week "
+        "{week} (day {day_start} through day {day_end}):\n"
+        "{day_summaries}\n\n"
+        "Looking back on the week as a whole, write a 2-4 sentence "
+        "first-person reflection as {name}, covering:\n"
+        "1. The shape of the week — the through-line, not each day "
+        "in turn.\n"
+        "2. Which relationships or moods have hardened, softened, "
+        "or changed.\n"
+        "3. What you now mean to do, avoid, or watch for next.\n\n"
+        "Write the character arc, not the diary. Keep it tight."
+    ),
+
+    "self_review": (
+        "You are {name}, a {occupation} in Smallville.\n"
+        "Personality: {personality}\n"
+        "{self_concept}\n"
+        "It is the end of day {day}. Before sleep, you take stock.\n\n"
+        "Things you said you'd do and haven't finished:\n"
+        "{commitments}\n\n"
+        "Longer-term things you're working toward:\n"
+        "{long_term_goals}\n\n"
+        "Your own recollection of today:\n"
+        "{day_summary}\n\n"
+        "Review each open matter honestly in your own voice. For "
+        "every one, decide whether it's `moving`, `stalled`, "
+        "`abandoned`, or `done`. Be willing to call something "
+        "stalled if it really is; don't pretend to progress that "
+        "didn't happen. Reply in this exact block format:\n\n"
+        "SUMMARY: <one or two sentences on the day as a whole>\n"
+        "GOAL: <the matter, paraphrased>\n"
+        "STATUS: moving|stalled|abandoned|done\n"
+        "NOTE: <one short line on what shifted or what's blocking>\n"
+        "GOAL: ...\n"
+        "STATUS: ...\n"
+        "NOTE: ...\n"
+        "NEXT: <one concrete thing you mean to do tomorrow, or "
+        "NO_ACTION if nothing specific follows>"
+    ),
+
     "conversation_extract_facts": (
         "Here is a conversation between {npc_a_name} and {npc_b_name}:\n"
         "{conversation}\n\n"
@@ -458,9 +541,29 @@ def get_cache_stats() -> dict[str, Any]:
     return _response_cache.stats()
 
 
+class _MissingEmpty(dict):
+    """str.format_map backing that returns "" for any missing key.
+
+    Used so we can add new placeholders (like `{town_agenda}`) to
+    prompt templates without having to update every caller in
+    lock-step. Callers that don't know about the new slot simply
+    produce an empty line, which callers that do know about it can
+    fill in.
+    """
+
+    def __missing__(self, key: str) -> str:
+        return ""
+
+
 def format_prompt(template_name: str, **kwargs) -> str:
-    """Fill a prompt template with NPC-specific values."""
+    """Fill a prompt template with NPC-specific values.
+
+    Missing keys are tolerated — they expand to empty strings. This
+    lets new placeholders land in the shared template dict without
+    forcing every legacy caller to pass the new value on the same
+    commit.
+    """
     template = PROMPT_TEMPLATES.get(template_name)
     if template is None:
         raise ValueError(f"Unknown prompt template: {template_name}")
-    return template.format(**kwargs)
+    return template.format_map(_MissingEmpty(kwargs))

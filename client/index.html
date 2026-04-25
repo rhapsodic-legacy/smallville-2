@@ -16,7 +16,16 @@
             <div id="hud-time">Day 1 — Morning</div>
             <div id="hud-gold">Gold: 0</div>
             <div id="hud-status">Connecting...</div>
-            <div id="hud-memory-hint">[M] Memory Inspector</div>
+            <div id="hud-controls-hint">[WASD] Move · [E] Chat · [T] Trade · [M] Memory · [Tab] Camera</div>
+            <div id="hud-thinking-row">
+                <label for="hud-thinking-level">NPC thinking:</label>
+                <select id="hud-thinking-level">
+                    <option value="fast">Fast (snappy, less depth)</option>
+                    <option value="balanced" selected>Balanced (default)</option>
+                    <option value="deep">Deep (slower, richer)</option>
+                </select>
+            </div>
+            <div id="hud-agenda" class="hidden"></div>
         </div>
 
         <!-- Chat interface -->

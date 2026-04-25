@@ -157,12 +157,19 @@ class TestNPCSchedule:
         npc.daily_schedule = []
         assert npc.needs_new_schedule(2)
 
-    def test_no_new_schedule_when_has_entries(self):
-        """Duration model: don't regenerate while entries remain."""
-        npc = self._make_npc()
+    def test_no_new_schedule_when_has_entries_same_day(self):
+        """Within the same day, a non-empty schedule is reused."""
+        npc = self._make_npc()  # schedule_day=1
         assert not npc.needs_new_schedule(1)
-        # Even on a different day, if schedule has entries, don't regenerate
-        assert not npc.needs_new_schedule(2)
+
+    def test_regen_on_new_day_even_with_entries(self):
+        """New day forces regeneration — this guards against schedules
+        bloated by replan across days, which in a prior regression
+        caused NPCs to never cycle to a fresh day and end up parked
+        at the map border after ~40 game days."""
+        npc = self._make_npc()  # schedule_day=1
+        assert npc.needs_new_schedule(2)
+        assert npc.needs_new_schedule(5)
 
     def test_needs_schedule_when_empty(self):
         npc = self._make_npc()

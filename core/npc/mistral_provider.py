@@ -39,6 +39,7 @@ class MistralProvider(LLMProvider):
         overseer_model: str | None = None,
         max_calls_per_minute: int = 50,
     ) -> None:
+        super().__init__()
         self.api_key = api_key or os.environ.get("MISTRAL_API_KEY", "")
         self.npc_model = npc_model or self.NPC_MODEL
         self.overseer_model = overseer_model or self.OVERSEER_MODEL
@@ -72,6 +73,7 @@ class MistralProvider(LLMProvider):
         temperature: float = 0.7,
         purpose: str = "general",
         use_overseer_model: bool = False,
+        npc_id: str | None = None,
     ) -> str:
         """Call Mistral API and return the text response."""
         # Check cache first

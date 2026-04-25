@@ -211,6 +211,11 @@ def resolve_overlaps(
     Iterates up to 3 passes so that nudging NPC A onto NPC B's tile
     is caught and resolved in the same call. Nudged NPCs get trail
     data so the client animates the separation. Returns total NPCs moved.
+
+    The player NPC is never nudged: the player's position is
+    input-authoritative and silently teleporting the avatar because
+    they stood on top of another NPC would feel like the game fighting
+    the player. NPCs around the player are the ones that move aside.
     """
     total_moved = 0
 
@@ -218,10 +223,15 @@ def resolve_overlaps(
         # Rebuild occupied set fresh each pass to see current positions
         occupied = get_occupied_tiles(npcs)
 
-        # Build map of tile → list of resting NPCs on that tile
+        # Build map of tile → list of resting NPCs on that tile.
+        # The player is kept OUT of the candidate list so they never
+        # get moved by overlap resolution — but their tile is still in
+        # `occupied`, which causes NPCs to be nudged away from the player.
         tile_npcs: dict[tuple[int, int], list[NPC]] = {}
         for npc in npcs:
             if _is_walking(npc):
+                continue
+            if getattr(npc, "npc_id", "") == "player":
                 continue
             pos = (npc.tile_x, npc.tile_z)
             tile_npcs.setdefault(pos, []).append(npc)
@@ -256,6 +266,19 @@ def resolve_overlaps(
                     extra_npc.z = float(new_pos[1])
                     occupied.add(new_pos)
                     moved_this_pass += 1
+
+                    # Persist the nudged position onto the current
+                    # schedule entry so re-dispatches don't send
+                    # the NPC back to the original occupied tile.
+                    if (extra_npc.daily_schedule
+                            and extra_npc.schedule_index
+                            < len(extra_npc.daily_schedule)):
+                        entry = extra_npc.daily_schedule[
+                            extra_npc.schedule_index
+                        ]
+                        entry.target_x = new_pos[0]
+                        entry.target_z = new_pos[1]
+
                     logger.debug(
                         "Nudged %s from (%d,%d) to (%d,%d) (pass %d)",
                         extra_npc.name, pos[0], pos[1],

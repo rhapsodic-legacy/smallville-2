@@ -192,50 +192,50 @@
 ## Phase 7: Evolution Layer
 > Goal: Overseer agent that evaluates and evolves NPC behaviours
 
-- [ ] 7.1 Fitness functions (core/evolution/fitness.py)
-  - [ ] 7.1.1 Multi objective scoring (survival, prosperity, social, goals, engagement)
-  - [ ] 7.1.2 Configurable weights per world theme
-  - [ ] 7.1.3 Population level metrics
-- [ ] 7.2 Overseer agent (core/evolution/overseer.py)
-  - [ ] 7.2.1 Periodic evaluation cycle
-  - [ ] 7.2.2 Strategy analysis (what's working, what's failing)
-  - [ ] 7.2.3 Intervention triggers (stagnation, runaway behaviours, imbalance)
-- [ ] 7.3 Evolution mechanisms (core/evolution/mechanisms.py)
-  - [ ] 7.3.1 Parameter tuning (risk tolerance, cooperation, aggression)
-  - [ ] 7.3.2 Policy templates (merchant, hermit, politician strategies)
-  - [ ] 7.3.3 Prompt modifiers (behavioural directives injected into NPC prompts)
-- [ ] 7.4 Guardrails (core/evolution/guardrails.py)
-  - [ ] 7.4.1 Behavioural boundaries (prevent degenerate strategies)
-  - [ ] 7.4.2 Narrative consistency checks
-  - [ ] 7.4.3 Modular rule system (pluggable for AI Game Studio)
-- [ ] 7.5 Verify: Overseer runs, evaluates, injects policies, population adapts
+- [x] 7.1 Fitness functions (core/evolution/fitness.py)
+  - [x] 7.1.1 Multi objective scoring (survival, prosperity, social, goals, engagement)
+  - [x] 7.1.2 Configurable weights per world theme
+  - [x] 7.1.3 Population level metrics
+- [x] 7.2 Overseer agent (core/evolution/overseer.py)
+  - [x] 7.2.1 Periodic evaluation cycle
+  - [x] 7.2.2 Strategy analysis (what's working, what's failing)
+  - [x] 7.2.3 Intervention triggers (stagnation, runaway behaviours, imbalance)
+- [x] 7.3 Evolution mechanisms (core/evolution/mechanisms.py)
+  - [x] 7.3.1 Parameter tuning (risk tolerance, cooperation, aggression)
+  - [x] 7.3.2 Policy templates (merchant, hermit, politician strategies)
+  - [x] 7.3.3 Prompt modifiers (behavioural directives injected into NPC prompts)
+- [x] 7.4 Guardrails (core/evolution/guardrails.py)
+  - [x] 7.4.1 Behavioural boundaries (prevent degenerate strategies)
+  - [x] 7.4.2 Narrative consistency checks
+  - [x] 7.4.3 Modular rule system (pluggable for AI Game Studio)
+- [x] 7.5 Verify: Overseer runs, evaluates, injects policies, population adapts
 
 ---
 
 ## Phase 8: Player Integration
 > Goal: Human player interacts with NPC world
 
-- [ ] 8.1 Player as NPC (core/player/player_agent.py)
-  - [ ] 8.1.1 Player data model (same as NPC, flagged as human)
-  - [ ] 8.1.2 Configurable NPC awareness of player (indistinguishable vs known)
-  - [ ] 8.1.3 NPC interaction priority boost for player
-- [ ] 8.2 Chat interface (client/js/chat_ui.js)
-  - [ ] 8.2.1 Text input for talking to nearby NPCs
-  - [ ] 8.2.2 Conversation history display
-  - [ ] 8.2.3 NPC response generation (LLM with memory context)
-- [ ] 8.3 Player movement and camera (client/js/player_controls.js)
-  - [ ] 8.3.1 WASD/arrow movement
-  - [ ] 8.3.2 Camera follow mode
-  - [ ] 8.3.3 Interaction radius display
-- [ ] 8.4 Trading UI (client/js/trade_ui.js)
-  - [ ] 8.4.1 Player inventory display
-  - [ ] 8.4.2 Trade proposal interface
-  - [ ] 8.4.3 NPC negotiation responses
-- [ ] 8.5 HUD (client/js/hud.js)
-  - [ ] 8.5.1 Time of day, gold, nearby NPCs
-  - [ ] 8.5.2 Minimap
-  - [ ] 8.5.3 Notification feed (events happening in town)
-- [ ] 8.6 Verify: Player walks around, chats, trades, NPCs remember player
+- [x] 8.1 Player as NPC (core/player/player_agent.py)
+  - [x] 8.1.1 Player data model (same as NPC, flagged as human)
+  - [x] 8.1.2 Configurable NPC awareness of player (indistinguishable vs known)
+  - [x] 8.1.3 NPC interaction priority boost for player
+- [x] 8.2 Chat interface (client/js/chat_ui.js)
+  - [x] 8.2.1 Text input for talking to nearby NPCs
+  - [x] 8.2.2 Conversation history display
+  - [x] 8.2.3 NPC response generation (LLM with memory context)
+- [x] 8.3 Player movement and camera (client/js/player_controls.js)
+  - [x] 8.3.1 WASD/arrow movement
+  - [x] 8.3.2 Camera follow mode
+  - [x] 8.3.3 Interaction radius display
+- [x] 8.4 Trading UI (client/js/trade_ui.js)
+  - [x] 8.4.1 Player inventory display
+  - [x] 8.4.2 Trade proposal interface
+  - [x] 8.4.3 NPC negotiation responses
+- [x] 8.5 HUD (client/js/hud.js)
+  - [x] 8.5.1 Time of day, gold, nearby NPCs
+  - [x] 8.5.2 Minimap
+  - [x] 8.5.3 Notification feed (events happening in town)
+- [x] 8.6 Verify: Player walks around, chats, trades, NPCs remember player
 
 ---
 
@@ -271,10 +271,72 @@
 
 ---
 
+## Active Sub-Roadmaps
+- **MEMORY_ROADMAP.md** — Holistic conversation memory (per-turn persistence,
+  outcome extraction, cross-NPC propagation). Shipped 2026-04-20.
+- **MEMORY_V2_ROADMAP.md** — Next-generation memory: tag-based specific
+  retention, hierarchical compaction, progress-aware objectives,
+  unified persona snapshot. Design phase.
+
 ## Current Status
-**Active Phase:** 7 (Evolution Layer)
-**Last Updated:** 2026-03-29
-**Notes:** Phase 6 complete + movement fixes + seed memories + diagnostic experiment + door fix.
+**Active Phase:** 9 (AI Game Studio Bridge) — paused pending the
+emergent-behaviour evidence loop below.
+**Last Updated:** 2026-04-24
+**Notes:** Phase 8 complete. Memory v2 phases K, H, I shipped
+(see MEMORY_V2_ROADMAP.md). Phase J (persona snapshot) parked in
+favour of a bridge-objector diagnostic that exercises a new weighted-
+participation gate on town goals. 1333 unit tests passing.
+
+**Hardware-constrained pause (2026-04-24):** The bridge-objector
+diagnostic (`tests/simulation/diagnostic_bridge_objector.py`) uses
+local Gemma-e2b to get non-deterministic NPC cognition — necessary
+because MockProvider sims are deterministic and hide exactly the
+emergent cases we need to see. Smoke-tested through day 1 on the
+current Mac (conscientious objector Jasper, opposes:repair_bridge=0.9,
+score=-0.60, p=14.1 %). Full 30-60 day run deferred: Gemma-e2b on
+this hardware produces ~1 sim day per 30 wall-minutes with 10 NPCs.
+Next concrete step when better hardware is available is a
+`--days=30` run followed by reading the daily logs for voiced dissent,
+bridge goal success/failure pattern, and sentiment shifts around the
+objector. Decisions on Phase J and further Memory v2 work wait on
+that evidence. Details + reasoning in MEMORY_V2_ROADMAP.md under
+"Emergent-behaviour pivot" and "Phase J — PARKED".
+
+**Phase 8 Player Integration (2026-04-11):**
+
+**PlayerAgent** (`core/player/player_agent.py`): Composition-based player wrapping an
+NPC. `PlayerAgent.create()` spawns a "Traveller" NPC with player-specific defaults
+(gold=50, move_speed=3.0). Two awareness modes: `INDISTINGUISHABLE` (NPCs treat player
+as another NPC) and `KNOWN_HUMAN` (NPCs acknowledge the player as a visitor).
+Server-authoritative movement: `movement_tick()` validates direction against grid,
+lerps smoothly, clamps to tile boundaries. `find_player_spawn()` finds passable tile
+near grid centre (0,0). Player NPC registered in NPCManager — perceived by other NPCs,
+included in conversations, participates in the economy.
+
+**Server Wiring** (`server/main.py`): `handle_message()` now async. Three new message
+types: `player_move` (sets direction, position broadcast via tick), `player_chat` (routes
+through `initiate_conversation`/`continue_conversation` with full LLM + memory context),
+`player_trade` (creates TradeOffer, NPC evaluates via `evaluate_trade_heuristic`). Player
+data included in every tick broadcast and init message. Camera focus auto-tracks player
+position for tier assignment.
+
+**Client Modules:**
+- **PlayerControls** (`player_controls.js`): WASD/arrow input, smooth camera follow
+  with lerp, interaction radius ring indicator, Tab toggles camera mode (follow/orbit).
+- **ChatUI** (`chat_ui.js`): Press E near NPC to open chat panel. Text input with Enter
+  to send. Conversation history with player/NPC/system message styling. Auto-targets
+  closest NPC. Escape to close.
+- **TradeUI** (`trade_ui.js`): Press T to open trade panel. Item name/qty inputs for
+  offer and request. Gold slider. NPC evaluates and responds. Inventory display.
+- **HUD** (`hud.js`): Health/energy/hunger stat bars, minimap (canvas 2D with NPC dots
+  and player marker), nearby NPC list, notification feed with auto-dismiss.
+
+**main.js** rewritten to integrate all modules. OrbitControls disabled when player active.
+Tick handler distributes data to player controls, chat, trade, HUD, and minimap.
+
+24 new unit tests covering: creation, all 4 movement directions, blocked movement,
+out-of-bounds, speed application, nearby NPC detection, awareness modes, spawn point
+selection, and serialisation.
 
 **Post-Phase 6 Fixes (2026-03-28):**
 
@@ -376,7 +438,7 @@ per-NPC concrete goals, and post-run analysis. Results:
 - Sync score: 0.24 (target <0.2 — slot transitions still cluster; needs reactive re-planning)
 - Subtask variety: 57.5 unique/day (target ≥8 — PASS)
 - Goal progress: 9/10 NPCs completed ≥3/5 substeps, 7/10 fully complete (PASS)
-- Files: `tests/simulation/test_instrumented_sim.py`, `analyse_diagnostic.py`, `goals.py`
+- Files: `tests/simulation/diagnostic_instrumented_sim.py`, `analyse_diagnostic.py`, `goals.py`
 
 **Door Placement Fix**: Doors moved from one tile outside building to the building's south
 wall (last row of footprint). Door tile is walkable; approach tile (one south) also walkable.

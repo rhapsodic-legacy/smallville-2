@@ -20,6 +20,7 @@ from core.npc.manager import NPCManager
 from core.npc.models import ActivityState
 from core.npc.llm_client import MockProvider
 from core.memory.manager import MemoryManager
+from core.memory.episodic import EpisodicStore
 from core.time_system.clock import GameClock
 from core.world.generator import WorldConfig, generate_world
 
@@ -36,7 +37,8 @@ def world():
 def manager(world):
     grid, buildings = world
     llm = MockProvider()
-    memory = MemoryManager(llm=llm)
+    episodic = EpisodicStore(fallback_only=True)
+    memory = MemoryManager(llm=llm, episodic=episodic)
     mgr = NPCManager(
         grid=grid,
         buildings=buildings,
@@ -80,7 +82,7 @@ def _run_simulation(
                 })
             snapshots.append(snap)
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.new_event_loop().run_until_complete(_run())
     return snapshots
 
 
@@ -94,7 +96,7 @@ def _advance_to_slot(manager: NPCManager, clock: GameClock, target_slot: str):
                 return
         raise TimeoutError(f"Never reached slot '{target_slot}'")
 
-    asyncio.get_event_loop().run_until_complete(_run())
+    asyncio.new_event_loop().run_until_complete(_run())
 
 
 class TestNightOscillation:

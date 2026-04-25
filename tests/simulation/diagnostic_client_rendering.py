@@ -10,7 +10,7 @@ then simulates 60fps client-side rendering to detect anomalies:
 Tests the trail-based approach: server sends tiles traversed this tick
 (max 2-3 waypoints). Client walks through them. No full path, no sync.
 
-Run: python3 tests/simulation/test_client_rendering.py
+Run: python3 tests/simulation/diagnostic_client_rendering.py
 """
 
 from __future__ import annotations

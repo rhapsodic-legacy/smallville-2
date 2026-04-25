@@ -353,7 +353,7 @@ class TestTownPromptGenerator:
     def test_heuristic_mode(self):
         """Without LLM, should use heuristic fallback."""
         gen = TownPromptGenerator(seed=42)
-        spec = asyncio.get_event_loop().run_until_complete(
+        spec = asyncio.new_event_loop().run_until_complete(
             gen.generate_config("a cozy riverside town with two bridges")
         )
         assert isinstance(spec, GeneratedWorldSpec)
@@ -365,7 +365,7 @@ class TestTownPromptGenerator:
 
     def test_fortified_implies_ruler(self):
         gen = TownPromptGenerator(seed=42)
-        spec = asyncio.get_event_loop().run_until_complete(
+        spec = asyncio.new_event_loop().run_until_complete(
             gen.generate_config("a fortified mining town with walls")
         )
         assert spec.config.has_ruler is True
@@ -373,7 +373,7 @@ class TestTownPromptGenerator:
 
     def test_spec_to_dict(self):
         gen = TownPromptGenerator(seed=42)
-        spec = asyncio.get_event_loop().run_until_complete(
+        spec = asyncio.new_event_loop().run_until_complete(
             gen.generate_config("a small plains village")
         )
         d = spec.to_dict()
@@ -384,7 +384,7 @@ class TestTownPromptGenerator:
 
     def test_custom_grid_size(self):
         gen = TownPromptGenerator(seed=42, grid_width=80, grid_height=80)
-        spec = asyncio.get_event_loop().run_until_complete(
+        spec = asyncio.new_event_loop().run_until_complete(
             gen.generate_config("a large trading hub on the plains")
         )
         assert spec.config.grid_width == 80
@@ -393,7 +393,7 @@ class TestTownPromptGenerator:
     def test_mood_economy_hint(self):
         """Rustic mood should suggest farming economy."""
         gen = TownPromptGenerator(seed=42)
-        spec = asyncio.get_event_loop().run_until_complete(
+        spec = asyncio.new_event_loop().run_until_complete(
             gen.generate_config("a rustic hamlet in the hills")
         )
         assert spec.config.economy == "farming"
