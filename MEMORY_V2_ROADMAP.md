@@ -651,4 +651,16 @@ throughput — the daily logs answer whether Jasper's opposition shapes
 the run (voiced dissent, failed/succeeded bridge cycles, sentiment
 shifts) or gets absorbed as noise. That evidence decides whether J
 stays parked or re-opens with a tighter scope.
-**Last updated:** 2026-04-24
+
+**Architectural direction added 2026-05-02:** A second parallel reading
+of the K/H/I/J phases emerged in conversation: each is mostly
+*compensating* for missing agent properties that a different
+architecture would produce for free. Captured in
+`AGENT_DIRECTION.md` as the IoA-derived (Vijoy Pandey / AGNTCY)
+communal-substrate + private-experience + message-only-propagation
+philosophy. If the bridge-objector evidence reinforces the diagnosis,
+the first experiment is privatising sentiment (move
+`SentimentTracker` global table to per-NPC `beliefs_about_others`),
+and Phase J in its current shape probably never reopens. Read
+AGENT_DIRECTION.md for the full argument and dependency order.
+**Last updated:** 2026-05-02

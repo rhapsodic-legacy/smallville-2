@@ -276,7 +276,13 @@
   outcome extraction, cross-NPC propagation). Shipped 2026-04-20.
 - **MEMORY_V2_ROADMAP.md** — Next-generation memory: tag-based specific
   retention, hierarchical compaction, progress-aware objectives,
-  unified persona snapshot. Design phase.
+  unified persona snapshot. K/H/I shipped; J parked pending evidence.
+- **AGENT_DIRECTION.md** — IoA-derived architectural philosophy
+  (communal world-state + private experience + message-only
+  propagation). Captured 2026-05-02. Not a roadmap to start now;
+  the direction Smallville drifts toward if bridge-objector evidence
+  confirms current mechanism layer compensates for missing agent
+  properties. First experiment if reached: privatise sentiment.
 
 ## Current Status
 **Active Phase:** 9 (AI Game Studio Bridge) — paused pending the

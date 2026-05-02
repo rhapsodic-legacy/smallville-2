@@ -133,6 +133,12 @@ whether Phase J re-opens. Full rationale in MEMORY_V2_ROADMAP.md under
   - MEMORY_V2_ROADMAP.md — next-gen memory: tags, compaction,
     progress-aware objectives, unified persona snapshot (design
     phase, not started)
+- **Architectural direction:** AGENT_DIRECTION.md — the
+  IoA-derived (Vijoy Pandey / AGNTCY) communal-substrate +
+  private-experience + message-only-propagation philosophy that
+  Smallville should drift toward as evidence accumulates that the
+  current mechanism layer compensates for missing agent properties.
+  Captured 2026-05-02; not started, gated on bridge-objector logs.
 - Update roadmap status as work completes
 - Read PROJECT_ROADMAP.md first after any interruption to understand current state,
   then any active sub-roadmap listed in its "Active Sub-Roadmaps" section
