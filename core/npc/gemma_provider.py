@@ -165,16 +165,36 @@ class GemmaProvider(LLMProvider):
             logger.error("Gemma/Ollama call failed [%s]: %s", purpose, e)
             raise
 
-    def _sync_chat(self, payload: bytes) -> dict:
-        """Synchronous Ollama /api/chat call — run via asyncio.to_thread."""
-        req = Request(
-            f"{self.base_url}/api/chat",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
+    def _sync_chat(self, payload: bytes, attempts: int = 3) -> dict:
+        """Synchronous Ollama /api/chat call — run via asyncio.to_thread.
+
+        Each attempt has a hard 120s socket timeout so a dead connection
+        (e.g. the TCP socket killed by a macOS sleep/wake cycle) can never
+        block indefinitely. On timeout / connection error we retry a
+        bounded number of times, then raise a clear error rather than
+        stall — the caller (and the diagnostic's per-tick watchdog) then
+        fail loudly instead of hanging silently.
+        """
+        last_err: Exception | None = None
+        for i in range(attempts):
+            req = Request(
+                f"{self.base_url}/api/chat",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urlopen(req, timeout=120) as resp:
+                    return json.loads(resp.read())
+            except (TimeoutError, URLError, OSError) as e:
+                last_err = e
+                logger.warning(
+                    "Ollama /api/chat attempt %d/%d failed: %s",
+                    i + 1, attempts, e,
+                )
+        raise RuntimeError(
+            f"Ollama /api/chat failed after {attempts} attempts: {last_err}"
         )
-        with urlopen(req, timeout=120) as resp:
-            return json.loads(resp.read())
 
     @staticmethod
     def _build_chat_messages(
