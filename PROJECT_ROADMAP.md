@@ -272,6 +272,29 @@
 ---
 
 ## Active Sub-Roadmaps
+- **FOUNDATION_REBUILD_ROADMAP.md** — Holistic rebuild of the NPC
+  scheduling / planning / execution / town-goal-contribution
+  foundation. **COMPLETE 2026-06-07** (single-town). The original bug —
+  organic town goals could only ever expire — is fixed and validated;
+  root-caused through five layers (eval measurement bug → bedtime
+  preemption → schedule-advance stall → `_parse_llm_schedule` mangling
+  → MockProvider replan-churn stub artifact), each disproven by the
+  eval/probes, never guessed. Now: durable `Commitment`s → bounded
+  derived plan → faithful schedule parser → bedtime-safe commitment-keyed
+  crediting. Steered throughout by `tests/simulation/eval_foundation.py`
+  (deterministic behavioural dashboard). Read this if revisiting the
+  scheduling/agenda layer.
+- **"Living world" arc (future, not started)** — the long-term vision:
+  an RPG world where helping the peoples matters and towns grow
+  *organically*, including under *unforeseen* circumstances. Design
+  consequence (captured in conversation 2026-06-07): "unforeseen" rules
+  out an event→effect rules table as the core engine — adaptation must
+  emerge from GENERAL drivers (utility/economy/needs), with the LLM for
+  novelty. ~95–99% of NPCs on the utility layer; important NPCs get
+  togglable LLM "bigger brains" via the existing tier/router priority
+  seam. First real capability = utility-based dynamic professions.
+  Measured by emergence diagnostics (bridge-objector style), not binary
+  tests. Ties into AGENT_DIRECTION (proximity/message propagation).
 - **MEMORY_ROADMAP.md** — Holistic conversation memory (per-turn persistence,
   outcome extraction, cross-NPC propagation). Shipped 2026-04-20.
 - **MEMORY_V2_ROADMAP.md** — Next-generation memory: tag-based specific
@@ -285,13 +308,22 @@
   properties. First experiment if reached: privatise sentiment.
 
 ## Current Status
-**Active Phase:** 9 (AI Game Studio Bridge) — paused pending the
-emergent-behaviour evidence loop below.
-**Last Updated:** 2026-04-24
+**Active Phase:** Foundation rebuild COMPLETE (2026-06-07) — see
+FOUNDATION_REBUILD_ROADMAP.md. The NPC scheduling/planning/town-goal
+foundation was found broken (organic town goals could only ever expire)
+and rebuilt: durable commitments, bounded derived plan, faithful
+schedule parser, bedtime-safe crediting. Validated by a deterministic
+behavioural eval (`tests/simulation/eval_foundation.py`) on both
+schedule paths, plus full unit + movement suites. The single optional
+remaining item is a real-Gemma bridge-objector confirmation run, which —
+now that goals can actually complete — should finally answer the original
+emergent-behaviour questions (does the bridge succeed around the objector,
+does sentiment shift). The "living world" arc is the next major direction
+(see Active Sub-Roadmaps).
+**Last Updated:** 2026-06-07
 **Notes:** Phase 8 complete. Memory v2 phases K, H, I shipped
-(see MEMORY_V2_ROADMAP.md). Phase J (persona snapshot) parked in
-favour of a bridge-objector diagnostic that exercises a new weighted-
-participation gate on town goals. 1333 unit tests passing.
+(see MEMORY_V2_ROADMAP.md). Phase J parked. Foundation rebuild shipped
+2026-06-07. Unit suite green (~1353).
 
 **Hardware-constrained pause (2026-04-24):** The bridge-objector
 diagnostic (`tests/simulation/diagnostic_bridge_objector.py`) uses

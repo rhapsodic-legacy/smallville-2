@@ -15,6 +15,7 @@ from typing import Any
 
 from core.npc.models import (
     NPC, ActivityState, PersonalityTraits, ScheduleEntry, SubTask,
+    Commitment, CommitmentStatus,
     OCCUPATION_DEFAULTS, FIRST_NAMES, BACKSTORY_TEMPLATES,
 )
 from core.npc.seed_memories import seed_population_memories
@@ -624,7 +625,7 @@ class NPCManager:
                             npc, self.llm, current_day,
                             relationship_summary=rel_summary,
                             town_agenda_summary=self.town_agenda.summary_for_prompt(
-                                npc.npc_id,
+                                npc.npc_id, self_concept=npc.self_concept,
                             ),
                         )
                     )
@@ -647,10 +648,21 @@ class NPCManager:
                 continue
             if getattr(npc, "schedule_day", None) != current_day:
                 continue
-            if getattr(npc, "_goal_injected_for_day", None) == current_day:
+            if npc.goal_injected_for_day == current_day:
                 continue
             self._inject_goal_entry(npc, current_day)
-            npc._goal_injected_for_day = current_day
+            npc.goal_injected_for_day = current_day
+
+        # 2b-proj. Re-derive goal entries from durable commitments every
+        #     tick (Phase 3). Idempotent: only acts when a live
+        #     commitment's goal entry is missing from the reachable
+        #     schedule (e.g. the previous tick's replan wiped it), so the
+        #     goal is always present before the action-advance in step 3.
+        #     No-op for NPCs without live commitments.
+        for npc in self.npcs:
+            if self._skip_autonomous(npc) or npc.cognition_tier >= 4:
+                continue
+            self._project_commitments(npc)
 
         # 2c. Bed-time enforcement. Schedule entries are duration-
         #     based, so a badly-sized entry can keep an NPC at work
@@ -782,22 +794,15 @@ class NPCManager:
         # NPCs "contributing" without having moved at all.
         if 0 <= npc.schedule_index < len(npc.daily_schedule):
             finishing = npc.daily_schedule[npc.schedule_index]
-            goal_id = getattr(finishing, "town_goal_id", None)
-            if goal_id:
-                try:
-                    completed = self.town_agenda.record_contribution(
-                        goal_id, npc.npc_id, current_day=npc.schedule_day,
-                    )
-                    logger.info(
-                        "AGENDA %s: contributed to goal=%s (slot=%s%s)",
-                        npc.name, goal_id, finishing.slot,
-                        ", COMPLETED" if completed else "",
-                    )
-                except Exception:
-                    logger.exception(
-                        "AGENDA contribution failed for %s goal=%s",
-                        npc.name, goal_id,
-                    )
+            if finishing.goal_id:
+                completed = self._credit_goal_entry(
+                    npc, finishing.goal_id, npc.schedule_day,
+                )
+                logger.info(
+                    "AGENDA %s: contributed to goal=%s (slot=%s%s)",
+                    npc.name, finishing.goal_id, finishing.slot,
+                    ", COMPLETED" if completed else "",
+                )
 
         # Advance to next schedule entry
         npc.schedule_index += 1
@@ -838,10 +843,10 @@ class NPCManager:
                     await end_conversation(
                         npc, other, memory_manager=self.memory,
                     )
-                    # end_conversation sets _needs_post_convo_dispatch on both,
+                    # end_conversation sets needs_post_convo_dispatch on both,
                     # but we handle the sleep NPC directly below — clear the flag
                     # to prevent double-dispatch in movement_tick.
-                    npc._needs_post_convo_dispatch = False
+                    npc.needs_post_convo_dispatch = False
 
             # NPCs in conversation (non-sleep): don't dispatch, pick up on end
             if npc.conversation_partner:
@@ -849,7 +854,7 @@ class NPCManager:
 
             # Don't interrupt walking NPCs — they finish their path first
             if npc.activity == ActivityState.WALKING and npc.current_path:
-                npc._needs_post_convo_dispatch = True
+                npc.needs_post_convo_dispatch = True
                 return
 
             await self._dispatch_to_entry(npc, entry, current_slot)
@@ -859,7 +864,7 @@ class NPCManager:
                 "post-convo redispatch",
                 npc.name, npc.schedule_index, entry.activity,
             )
-            npc._needs_post_convo_dispatch = True
+            npc.needs_post_convo_dispatch = True
 
     async def _dispatch_to_entry(
         self, npc: NPC, entry: ScheduleEntry, current_slot: str,
@@ -952,9 +957,9 @@ class NPCManager:
         to the right location. Fires exactly once per conversation end.
         """
         for npc in self.npcs:
-            if not getattr(npc, '_needs_post_convo_dispatch', False):
+            if not npc.needs_post_convo_dispatch:
                 continue
-            npc._needs_post_convo_dispatch = False
+            npc.needs_post_convo_dispatch = False
 
             if npc.conversation_partner:
                 continue
@@ -1122,7 +1127,7 @@ class NPCManager:
                 await continue_conversation(
                     npc_b, npc_a, self.llm, memory_manager=self.memory,
                     town_agenda_summary=self.town_agenda.summary_for_prompt(
-                        npc_b.npc_id,
+                        npc_b.npc_id, self_concept=npc_b.self_concept,
                     ),
                     shared_agenda_summary=(
                         self.town_agenda.shared_matters_for_prompt(
@@ -1145,7 +1150,7 @@ class NPCManager:
                 await continue_conversation(
                     npc_a, npc_b, self.llm, memory_manager=self.memory,
                     town_agenda_summary=self.town_agenda.summary_for_prompt(
-                        npc_a.npc_id,
+                        npc_a.npc_id, self_concept=npc_a.self_concept,
                     ),
                     shared_agenda_summary=(
                         self.town_agenda.shared_matters_for_prompt(
@@ -1201,7 +1206,7 @@ class NPCManager:
                         grid=self.grid,
                         all_npcs=self.npcs,
                         town_agenda_summary=self.town_agenda.summary_for_prompt(
-                            npc.npc_id,
+                            npc.npc_id, self_concept=npc.self_concept,
                         ),
                         shared_agenda_summary=(
                             self.town_agenda.shared_matters_for_prompt(
@@ -1780,6 +1785,18 @@ class NPCManager:
             if is_sleep_home:
                 continue  # already going or going home to sleep
 
+            # Phase 4 — bedtime-safe crediting. A 240-min goal entry rarely
+            # elapses before night, so the old "credit only on full-duration
+            # finish" rule lost ~all contributions to the bedtime jump. If
+            # the NPC REACHED its goal entry (is at the goal location) and
+            # is now being sent home, it performed the goal today — credit
+            # it. NPCs still en route (not near the target) are not credited.
+            if (0 <= idx < len(npc.daily_schedule)
+                    and entry.goal_id and entry.target_x is not None
+                    and abs(npc.x - entry.target_x)
+                        + abs(npc.z - entry.target_z) <= 3):
+                self._credit_goal_entry(npc, entry.goal_id, npc.schedule_day)
+
             # End any conversation so the NPC can leave.
             if npc.conversation_partner:
                 other = self.get_npc(npc.conversation_partner)
@@ -1787,7 +1804,7 @@ class NPCManager:
                     await end_conversation(
                         npc, other, memory_manager=self.memory,
                     )
-                npc._needs_post_convo_dispatch = False
+                npc.needs_post_convo_dispatch = False
 
             # Jump to the last entry — by invariant this is sleep-at-home.
             npc.schedule_index = max(0, len(npc.daily_schedule) - 1)
@@ -1836,6 +1853,122 @@ class NPCManager:
             npc.path_index = 0
             npc._tick_trail = [(npc.home_x, npc.home_z)]
 
+    def _ensure_commitment(self, npc: NPC, goal, current_day: int) -> None:
+        """Foundation rebuild (Phase 2): record a DURABLE commitment when
+        an NPC takes a town goal on.
+
+        The commitment is the source of truth — it survives schedule
+        regeneration and mid-day replanning, unlike the old injected
+        schedule entry which replanning silently wiped. Phase 3 derives
+        the schedule from these; Phase 4 credits on fulfilment. Idempotent:
+        an NPC holds at most one live commitment per goal.
+        """
+        for c in npc.commitments:
+            if c.goal_id == goal.goal_id and c.status in (
+                CommitmentStatus.PENDING, CommitmentStatus.ACTIVE,
+            ):
+                return
+        npc.commitments.append(Commitment(
+            goal_id=goal.goal_id,
+            activity=goal.activity_text,
+            location=goal.location_hint,
+            deadline_day=goal.deadline_day,
+            duration_minutes=goal.duration_minutes,
+            town_id=getattr(goal, "town_id", None),
+            status=CommitmentStatus.PENDING,
+            created_day=current_day,
+        ))
+
+    def _resolve_commitments(self, goal) -> None:
+        """Prune every NPC's live commitment to a now-finished goal
+        (completed or expired). Keeps `commitments` bounded to live goals
+        only, so the list can't accumulate at population scale. Phase 4
+        marks FULFILLED at contribution time before this prune runs; here
+        a goal that's wrapped up simply has no live commitment left."""
+        for npc in self.npcs:
+            if not npc.commitments:
+                continue
+            npc.commitments = [
+                c for c in npc.commitments if c.goal_id != goal.goal_id
+            ]
+
+    def _project_commitments(self, npc: NPC) -> None:
+        """Re-derive goal entries from durable commitments (Phase 3).
+
+        Idempotent safety net: for every live commitment whose goal entry
+        is missing from the *reachable* part of the schedule (e.g. a
+        mid-day replan replaced it, or the cursor walked past it),
+        commandeer a future slot so it reappears. Because the schedule is
+        a projection of commitments, replanning can no longer permanently
+        wipe a goal — it returns before the NPC's next action advance.
+        No-op for NPCs without live commitments, so it is cheap to run
+        every tick at population scale.
+        """
+        if not npc.commitments or not npc.daily_schedule:
+            return
+        idx = max(0, npc.schedule_index)
+        for c in npc.commitments:
+            if c.status not in (
+                CommitmentStatus.PENDING, CommitmentStatus.ACTIVE,
+            ):
+                continue
+            if any(e.goal_id == c.goal_id for e in npc.daily_schedule[idx:]):
+                c.status = CommitmentStatus.ACTIVE
+                continue
+            target = self._projectable_slot(npc, idx)
+            if target is None:
+                continue
+            original = npc.daily_schedule[target]
+            npc.daily_schedule[target] = ScheduleEntry(
+                slot=original.slot,
+                activity=c.activity,
+                location=c.location,
+                priority=8,
+                duration_minutes=min(
+                    c.duration_minutes,
+                    original.duration_minutes or c.duration_minutes,
+                ),
+                goal_id=c.goal_id,
+            )
+            c.status = CommitmentStatus.ACTIVE
+
+    def _credit_goal_entry(
+        self, npc: NPC, goal_id: str, current_day: int,
+    ) -> bool:
+        """Credit one contribution for a goal the NPC has performed, mark
+        its commitment FULFILLED, and fire exactly once (Phase 4).
+
+        Idempotent on two levels: the agenda dedups per-NPC via the goal's
+        `contributors` set, and the FULFILLED status stops the commitment
+        re-projecting. Returns whether this contribution completed the goal.
+        """
+        for c in npc.commitments:
+            if c.goal_id == goal_id and c.status != CommitmentStatus.FULFILLED:
+                c.status = CommitmentStatus.FULFILLED
+        try:
+            return bool(self.town_agenda.record_contribution(
+                goal_id, npc.npc_id, current_day=current_day,
+            ))
+        except Exception:
+            logger.exception(
+                "AGENDA contribution failed for %s goal=%s", npc.name, goal_id,
+            )
+            return False
+
+    def _projectable_slot(self, npc: NPC, from_idx: int) -> int | None:
+        """Pick a reachable slot (index >= from_idx) to host a goal entry:
+        prefer afternoon, then evening, then morning; never the final
+        sleep-home entry, never one already hosting a goal."""
+        last_idx = len(npc.daily_schedule) - 1
+        for slot in ("afternoon", "evening", "morning"):
+            for i in range(from_idx, len(npc.daily_schedule)):
+                if i == last_idx:
+                    continue  # preserve the sleep-home entry
+                e = npc.daily_schedule[i]
+                if e.slot == slot and e.goal_id is None:
+                    return i
+        return None
+
     def _inject_goal_entry(self, npc: NPC, current_day: int) -> None:
         """If the NPC matches an active town goal, inject the goal entry.
 
@@ -1850,10 +1983,18 @@ class NPCManager:
         `_advance_npc_action` when the NPC finishes the goal entry,
         so the agenda is tied to time-in-slot rather than intent.
         The goal's completion triggers a town-event broadcast.
+
+        Phase 2 note: this still mutates the schedule (the fragile path
+        Phase 3 replaces), but now ALSO records a durable Commitment via
+        `_ensure_commitment` — the source of truth going forward.
         """
         goal = self.town_agenda.matching_goal_for(npc, self.rng)
         if goal is None or not npc.daily_schedule:
             return
+
+        # Durable commitment first (survives replan); schedule projection
+        # below is the to-be-replaced fragile mechanism.
+        self._ensure_commitment(npc, goal, current_day)
 
         # Find an afternoon or evening slot to commandeer. If none,
         # bail out rather than break the schedule.
@@ -1877,9 +2018,9 @@ class NPCManager:
             priority=8,
             duration_minutes=min(goal.duration_minutes, original.duration_minutes or goal.duration_minutes),
         )
-        # Stash the goal id on the entry so we can credit the NPC
-        # when `_advance_npc_action` finishes this entry.
-        setattr(npc.daily_schedule[target_idx], "town_goal_id", goal.goal_id)
+        # Name the goal on the entry (declared field) so the execution
+        # layer can credit the NPC when this entry finishes.
+        npc.daily_schedule[target_idx].goal_id = goal.goal_id
 
         logger.info(
             "AGENDA %s: committed to '%s' (goal=%s, deadline day %d)",
@@ -2227,6 +2368,8 @@ class NPCManager:
         lapses without completing. Lands for every NPC so the memory
         of a failed initiative colours subsequent planning/chat.
         """
+        # Phase 2: the goal lapsed — clear any live commitments to it.
+        self._resolve_commitments(goal)
         description = (
             f"The town initiative \"{goal.title}\" was not completed in "
             f"time — {goal.progress}/{goal.required_contributions} "
@@ -2258,6 +2401,8 @@ class NPCManager:
         per-NPC episodic memory (Phase F.3) so contributors remember
         the shared victory and bystanders remember the news.
         """
+        # Phase 2: the goal is done — clear any live commitments to it.
+        self._resolve_commitments(goal)
         try:
             self.events.process_event(GameEvent(
                 event_type="town_goal_completed",
@@ -2344,34 +2489,17 @@ class NPCManager:
     def _generate_deterministic_schedule(
         self, npc: NPC, current_slot: str, current_day: int,
     ) -> None:
-        """Use the planner to build a schedule (deterministic path)."""
-        action = self.planner.plan_action(
-            npc, self.npcs, current_slot,
-            resource_nodes=self.economy.get_resource_node_dicts(),
-            available_recipes=self.economy.get_available_recipes(),
-            construction_sites=self.economy.get_construction_site_dicts(),
-        )
-        if action is None:
-            return
-        entry = action.to_schedule_entry(current_slot)
-        if entry:
-            npc.daily_schedule = [entry]
-            npc.schedule_day = current_day
-            # Must also rewind the cursor and clear the action anchor,
-            # otherwise an NPC coming off an exhausted 7-entry schedule
-            # (idx=0, start=0 after _advance_npc_action) is fine, but
-            # one coming off a mid-day replan or a previous 1-entry
-            # deterministic schedule could still carry idx>0 / a stale
-            # start_minutes. The normalise pass catches this too, but
-            # doing it at the assignment site keeps the invariant
-            # local to the write.
-            npc.schedule_index = 0
-            npc.action_start_minutes = 0.0
-            # Pre-decompose into sub-tasks so NPC is never idle on arrival
-            subtasks = decompose_schedule_entry(npc, entry, npc._rng)
-            npc.subtask_queue = subtasks
-            npc.current_subtask = None
-            npc.subtask_time_remaining = 0.0
+        """Deterministic DAILY schedule = the sound occupation template.
+
+        (Phase 3.5) `planner.plan_action` returns a single tactical
+        action, not a coherent day — routing daily-schedule generation
+        through it left NPCs with a 1-entry schedule, no afternoon slot
+        to host a town-goal entry, and `projected=0`. The occupation
+        template is the validated well-formed full-day source (7 entries,
+        real durations, sleep at night), so route through it. The planner
+        remains available for moment-to-moment action selection elsewhere.
+        """
+        _force_template_schedule(npc, current_day)
 
     async def _decompose_llm(self, npc: NPC, entry: ScheduleEntry) -> None:
         """Decompose a schedule entry using LLM with memory context."""

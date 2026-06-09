@@ -384,7 +384,10 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "town initiative with them — working on it together or "
         "recently completing it — mention it naturally; it's fresh "
         "common ground. If this feels like a new encounter and you "
-        "know of a headline town matter, it's a natural opener."
+        "know of a headline town matter, it's a natural opener. "
+        "But if a town matter conflicts with how you see yourself, "
+        "it is natural to voice your reservations rather than go "
+        "along with it."
     ),
 
     "conversation_respond": (
@@ -404,7 +407,9 @@ PROMPT_TEMPLATES: dict[str, str] = {
         "unless it makes clear sense. If you have an open matter "
         "with this person that fits, work it into your reply. If "
         "you share a town initiative with them, referencing it is "
-        "natural conversational glue."
+        "natural conversational glue. But if a town matter conflicts "
+        "with how you see yourself, it is natural to voice your "
+        "reservations rather than simply agree."
     ),
 
     "reaction": (

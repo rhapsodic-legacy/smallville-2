@@ -103,6 +103,10 @@ class TownGoal:
     # `GoalTemplate.identity_key` for back-compat with test-constructed
     # TownGoals that skip the field.
     identity_key: str = "helped:town"
+    # Foundation rebuild (multi-town seam): which town owns this goal.
+    # None = the single default town. Agenda queries filter on this so
+    # cross-town goals become an additive layer, not single-town rework.
+    town_id: str | None = None
 
     def participation_score(self, npc: NPC) -> float:
         """Weighted sum of pulls toward contributing to this goal.
@@ -465,23 +469,40 @@ class TownAgenda:
             return ""
         return "Shared town matters: " + "; ".join(parts) + "."
 
-    def summary_for_prompt(self, npc_id: str = "") -> str:
+    def summary_for_prompt(
+        self, npc_id: str = "",
+        self_concept: dict[str, float] | None = None,
+    ) -> str:
         """One-line cue for LLM prompts describing active town matters.
 
         Returns the empty string when nothing is on the docket so the
         prompt stays clean. When a goal is on the list, highlights
         whether this NPC has already committed to it — that cue lets
         the conversation prompt drive commitment talk naturally.
+
+        When ``self_concept`` is supplied, the NPC's stance toward a goal
+        (an ``opposes:<goal_id>`` / ``supports:<goal_id>`` belief) is
+        rendered alongside the title, so the salient town topic carries
+        the NPC's own position rather than appearing stance-neutral. This
+        couples the belief to the thing being discussed; without it the
+        opposition is an isolated self-concept line the model tends to
+        ignore in favour of the prompt's pro-engagement cues.
         """
         active = self.active_and_proposed()
         if not active:
             return ""
         parts: list[str] = []
         for goal in active[:3]:
+            stance = ""
+            if self_concept:
+                if self_concept.get(f"opposes:{goal.goal_id}", 0.0) > 0:
+                    stance = " (you oppose this)"
+                elif self_concept.get(f"supports:{goal.goal_id}", 0.0) > 0:
+                    stance = " (you support this)"
             if npc_id and npc_id in goal.contributors:
-                parts.append(f"{goal.title} (you are helping)")
+                parts.append(f"{goal.title} (you are helping){stance}")
             else:
-                parts.append(goal.title)
+                parts.append(f"{goal.title}{stance}")
         return "Town matters on your mind: " + "; ".join(parts) + "."
 
     def to_dict(self) -> dict[str, Any]:

@@ -461,8 +461,8 @@ class TestConversationSentiment:
             bob.conversation_partner = alice.npc_id
 
             await end_conversation(alice, bob)
-            assert alice._needs_post_convo_dispatch is True
-            assert bob._needs_post_convo_dispatch is True
+            assert alice.needs_post_convo_dispatch is True
+            assert bob.needs_post_convo_dispatch is True
         asyncio.new_event_loop().run_until_complete(_run())
 
 

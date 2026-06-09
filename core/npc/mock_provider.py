@@ -371,6 +371,14 @@ class MockProvider(LLMProvider):
         return self._cycle(purpose, "default", ["Acknowledged."])
 
     def _pick_daily_plan(self, prompt: str) -> str:
+        # A mid-day REPLAN prompt asks whether to change the remaining
+        # schedule and to reply NO_CHANGE if not (the initial daily-plan
+        # prompt never mentions NO_CHANGE). A real NPC usually keeps its
+        # plan — model that. Returning a freshly-rotated full-day schedule
+        # on every replan was a stub artifact that made replan churn the
+        # schedule every 60 game-minutes, preventing goal completion.
+        if "NO_CHANGE" in prompt:
+            return "NO_CHANGE"
         occ = _detect_occupation(prompt)
         pool = (
             self._custom_pool("daily_plan", occ)
