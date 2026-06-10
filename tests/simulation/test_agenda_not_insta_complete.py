@@ -175,7 +175,7 @@ class TestContributionOnActionFinish:
                 location="town_square", priority=8,
                 duration_minutes=60,
             )
-            setattr(entry, "town_goal_id", "bridge")
+            entry.goal_id = "bridge"
             # Next entry to advance into (so we don't hit the
             # schedule-regeneration branch).
             tail = ScheduleEntry(

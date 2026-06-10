@@ -124,6 +124,11 @@ class ScheduleEntry:
     target_x: int | None = None  # Pre-resolved coordinates (from planner)
     target_z: int | None = None
     duration_minutes: float = 0.0  # How long this action lasts (game minutes)
+    # Foundation rebuild: declared replacement for the fragile
+    # `setattr(entry, "town_goal_id", ...)` pattern. When this entry is a
+    # projection of a town-goal Commitment, goal_id names that goal so the
+    # execution layer can credit it. None for ordinary entries.
+    goal_id: str | None = None
 
 
 @dataclass
@@ -139,6 +144,36 @@ class SubTask:
     location: str = ""            # same format as ScheduleEntry.location
     target_object: str | None = None  # e.g. "anvil", "bed", "altar"
     activity_state: str = "idle"  # maps to ActivityState value
+
+
+class CommitmentStatus(str, Enum):
+    """Lifecycle of an NPC's commitment to a town goal."""
+    PENDING = "pending"      # taken on; not yet acted upon
+    ACTIVE = "active"        # the NPC is working toward it
+    FULFILLED = "fulfilled"  # the NPC performed it (contribution credited)
+    ABANDONED = "abandoned"  # given up, or the goal expired
+
+
+@dataclass
+class Commitment:
+    """A durable intention to contribute to a town goal.
+
+    Foundation rebuild: first-class, declared NPC state
+    (`NPC.commitments`) that survives schedule regeneration AND mid-day
+    replanning — the daily schedule is a *projection* of commitments,
+    never their owner. This replaces the old fragile pattern where a
+    goal lived only as a `town_goal_id` stashed on an ephemeral
+    `ScheduleEntry` (which replanning silently wiped before the NPC
+    could act on it).
+    """
+    goal_id: str
+    activity: str
+    location: str
+    deadline_day: int
+    duration_minutes: int = 60  # how long the projected goal entry runs
+    town_id: str | None = None
+    status: CommitmentStatus = CommitmentStatus.PENDING
+    created_day: int = 0
 
 
 @dataclass
@@ -182,6 +217,10 @@ class NPC:
     work_z: int = 0
     # Stanford living_area: hierarchical address like "smallville:residential:home_3"
     living_area: str = ""
+    # Foundation rebuild (multi-town seam): which town this NPC belongs to.
+    # None = the single default town; agenda queries filter on this so
+    # cross-town collective behaviour is an additive layer, not a rewrite.
+    town_id: str | None = None
     health: float = 1.0
     energy: float = 1.0
     hunger: float = 0.0  # 0 = full, 1 = starving
@@ -211,6 +250,21 @@ class NPC:
     action_start_minutes: float = 0.0  # game-minutes when current action started
     has_custom_schedule: bool = False  # True = loop custom schedule, don't regenerate
     last_replan_minutes: float = 0.0   # game-minutes when last mid-day replan happened
+
+    # --- Commitments (foundation rebuild: durable intent) ---
+    # Town-goal commitments the NPC has taken on. Durable across schedule
+    # regeneration and replanning; the daily_schedule is derived from
+    # these (among routine + needs), never the reverse. Populated in
+    # Phase 2; projected into the schedule in Phase 3; credited on
+    # fulfilment in Phase 4.
+    commitments: list["Commitment"] = field(default_factory=list)
+
+    # --- Transient scheduling flags (declared; were set via setattr) ---
+    # Day the once-per-day goal-participation check last ran for this NPC.
+    goal_injected_for_day: int = -1
+    # Set when a conversation ends mid-action so the movement tick
+    # re-dispatches the NPC to its schedule entry.
+    needs_post_convo_dispatch: bool = False
 
     # --- Resources ---
     gold: int = 0

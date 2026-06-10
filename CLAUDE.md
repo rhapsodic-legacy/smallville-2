@@ -98,20 +98,41 @@ python server/main.py
 
 ## Deferred — run when hardware allows
 
+> **Update 2026-06-07:** the NPC scheduling/town-goal **foundation has
+> since been rebuilt** (see FOUNDATION_REBUILD_ROADMAP.md). The
+> diagnostic originally ran on a broken foundation where town goals
+> could only ever EXPIRE (organic contributions were never credited).
+> That's now fixed — so a Gemma run would, for the first time, actually
+> exercise goal *completion* dynamics around the objector. The
+> diagnostic also now ends with a pre-registered CRITERIA VERDICT, and a
+> deterministic behavioural eval (`tests/simulation/eval_foundation.py`)
+> exists for fast, provider-independent checks.
+
 The bridge-objector diagnostic is the next concrete experiment. It's a
-logging-only sim (no pass/fail) that tests whether a weighted-
+logging-only sim that tests whether a weighted-
 participation gate + an NPC carrying `opposes:repair_bridge = 0.9`
-produces real emergent behaviour under non-deterministic Gemma. Phase
+produces real emergent behaviour under non-deterministic cognition. Phase
 J of Memory v2 (persona snapshot) is parked until we've read those
 logs. On the current Mac, Gemma-e2b produces ~1 sim day per 30
-wall-minutes at 10 NPCs — so 30 days takes ~15 hours.
+wall-minutes at 10 NPCs — so 30 days takes ~15 hours. (A faster
+`--provider mistral` path now exists for harness de-risking.)
 
 ```bash
 # Kill any straggler server first (frees Gemma throughput)
 ps aux | grep server/main | grep -v grep
 
-# Then run the diagnostic
-python3 tests/simulation/diagnostic_bridge_objector.py --days=30
+# Run long Gemma jobs SAFELY (lesson from a 31h silent hang 2026-06-09):
+#  - `caffeinate -i`  : prevent macOS idle-sleep, which SUSPENDS the
+#                       process (frozen, 0 CPU) — the #1 cause of the hang.
+#  - `python3 -u`     : unbuffered stdout so progress is live, not buffered.
+#  - `> run.log 2>&1` : stream to a logfile. NEVER pipe through `| tail` —
+#                       tail emits nothing until the process EXITS, so a
+#                       stalled run looks identical to a working one.
+# The diagnostic now prints a flushed [hb] heartbeat every 60s and a
+# [WATCHDOG] aborts loudly if any single tick hangs > 20 min.
+caffeinate -i python3 -u tests/simulation/diagnostic_bridge_objector.py \
+    --provider gemma --days=30 > /tmp/bridge_objector.log 2>&1 &
+# Watch it: tail -f /tmp/bridge_objector.log   (look for [hb] lines)
 ```
 
 After the run, read the daily log for: does Jasper voice opposition in

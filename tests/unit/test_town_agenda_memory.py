@@ -113,6 +113,36 @@ class TestSummaryForPrompt:
         assert "you are helping" in summary_alice
         assert "you are helping" not in summary_other
 
+    def test_renders_opposition_stance(self):
+        # An NPC carrying opposes:<goal_id> should see their stance coupled
+        # to the salient town topic, not a neutral title.
+        agenda = TownAgenda()
+        goal = create_goal_from_template("repair_bridge", current_day=1)
+        agenda.propose(goal, current_day=1)
+        summary = agenda.summary_for_prompt(
+            "jasper", self_concept={"opposes:repair_bridge": 0.9},
+        )
+        assert "you oppose this" in summary
+
+    def test_renders_support_stance(self):
+        agenda = TownAgenda()
+        goal = create_goal_from_template("repair_bridge", current_day=1)
+        agenda.propose(goal, current_day=1)
+        summary = agenda.summary_for_prompt(
+            "dara", self_concept={"supports:repair_bridge": 0.8},
+        )
+        assert "you support this" in summary
+
+    def test_stance_absent_without_self_concept(self):
+        # Back-compat: callers that don't pass self_concept get the neutral
+        # render exactly as before.
+        agenda = TownAgenda()
+        goal = create_goal_from_template("repair_bridge", current_day=1)
+        agenda.propose(goal, current_day=1)
+        summary = agenda.summary_for_prompt("jasper")
+        assert "oppose" not in summary
+        assert "support" not in summary
+
 
 # ---------- NPCManager memory seeding ----------
 

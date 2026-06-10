@@ -583,8 +583,8 @@ async def end_conversation(
     npc.current_action_description = ""
     other.current_action_description = ""
     # Flag for post-conversation dispatch (manager picks up schedule)
-    npc._needs_post_convo_dispatch = True
-    other._needs_post_convo_dispatch = True
+    npc.needs_post_convo_dispatch = True
+    other.needs_post_convo_dispatch = True
 
     if current_game_minutes > 0:
         npc.last_conversation_time = current_game_minutes
