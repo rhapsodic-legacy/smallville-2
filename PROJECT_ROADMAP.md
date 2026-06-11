@@ -299,7 +299,18 @@
   outcome extraction, cross-NPC propagation). Shipped 2026-04-20.
 - **MEMORY_V2_ROADMAP.md** — Next-generation memory: tag-based specific
   retention, hierarchical compaction, progress-aware objectives,
-  unified persona snapshot. K/H/I shipped; J parked pending evidence.
+  unified persona snapshot. K/H/I shipped; J parked pending evidence
+  (now re-opened/upgraded by the vectorization arc — see below).
+- **VECTORIZATION_ROADMAP.md** — NPC individuality. The measured problem:
+  NPCs read as parrots (Layer-1 metrics → SYSTEMIC: self barely forms,
+  drowned by 97% conversation volume, 0% sentiment friction). Research
+  (NVIDIA ACE/Convai, Skyrim Mantella, roleplay-LLM, Stanford) → the
+  foundation is a rich, CONCRETE, persistent persona (speech/behaviour
+  rules, not Big-5 numbers) conditioning every cognition call = MEMORY_V2
+  Phase J re-opened and upgraded. First step: concrete distinctive
+  personas as the dominant conversation-prompt block, then re-measure
+  with `npc_individuality.py`. The 30-day emergence run is GATED behind
+  these metrics moving. Recommended as a fresh stronger-model arc.
 - **AGENT_DIRECTION.md** — IoA-derived architectural philosophy
   (communal world-state + private experience + message-only
   propagation). Captured 2026-05-02. Not a roadmap to start now;

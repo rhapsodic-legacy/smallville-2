@@ -331,3 +331,35 @@ class TestSerialisation:
                       "required_contributions", "status", "contributors",
                       "deadline_day", "activity_text", "location_hint"):
             assert field in entry, f"Missing field in serialised goal: {field}"
+
+
+class TestStickyParticipation:
+    """A participation decision is made once per goal-cycle and sticks,
+    so a per-decision probability doesn't inflate over repeated daily
+    rolls (the bridge-objector join-rate calibration fix)."""
+
+    def _goal(self):
+        return create_goal_from_template("repair_bridge", current_day=0)
+
+    def test_decline_is_recorded_and_not_re_rolled(self):
+        goal = self._goal()
+        npc = _make_npc("obj_0")
+        # rng=1.0 forces should_participate False -> decline.
+        assert goal.decide_participation(npc, _FixedRng(1.0)) is False
+        assert npc.npc_id in goal.decliners
+        # Re-asking with rng=0.0 (which WOULD pass) must still decline,
+        # because the decision is sticky.
+        assert goal.decide_participation(npc, _FixedRng(0.0)) is False
+
+    def test_join_returns_true_and_is_not_recorded_as_decliner(self):
+        goal = self._goal()
+        npc = _make_npc("joiner_0")
+        assert goal.decide_participation(npc, _FixedRng(0.0)) is True
+        assert npc.npc_id not in goal.decliners
+
+    def test_existing_contributor_never_re_decides(self):
+        goal = self._goal()
+        npc = _make_npc("done_0")
+        goal.contributors.add(npc.npc_id)
+        # rng=0.0 would pass, but a contributor is already in -> False.
+        assert goal.decide_participation(npc, _FixedRng(0.0)) is False

@@ -92,6 +92,12 @@ class TownGoal:
     created_day: int
     progress: int = 0
     contributors: set[str] = field(default_factory=set)
+    # NPCs who decided NOT to back this goal-cycle. The participation
+    # decision is made ONCE per cycle and then sticks: without this, an
+    # NPC re-rolled `should_participate` every day the goal was active,
+    # so a per-decision p (e.g. an objector's ~0.14) compounded over a
+    # multi-day cycle into a much higher cycle-level join rate (~0.45).
+    decliners: set[str] = field(default_factory=set)
     status: GoalStatus = GoalStatus.PROPOSED
     # Absolute day the goal completed. -1 until COMPLETED. Phase G.3
     # uses this + the current day to detect "recent shared victory"
@@ -142,6 +148,22 @@ class TownGoal:
     def should_participate(self, npc: NPC, rng: random.Random) -> bool:
         """Sampled decision: True with `participation_probability`."""
         return rng.random() < self.participation_probability(npc)
+
+    def decide_participation(self, npc: NPC, rng: random.Random) -> bool:
+        """One-shot, sticky participation decision for this goal-cycle.
+
+        Already contributing or already declined -> no re-roll (False).
+        Otherwise sample once; a decline is recorded so the NPC is not
+        re-asked on later days. This makes the cycle-level join rate equal
+        `participation_probability` (the intended "rarely helps" feel)
+        instead of inflating it via repeated daily rolls.
+        """
+        if npc.npc_id in self.contributors or npc.npc_id in self.decliners:
+            return False
+        if self.should_participate(npc, rng):
+            return True
+        self.decliners.add(npc.npc_id)
+        return False
 
     def record_contribution(self, npc_id: str) -> bool:
         """Add a contribution from this NPC. Returns True if goal just
@@ -400,7 +422,7 @@ class TownAgenda:
         candidates = [g for g in self._goals.values()
                       if g.status in (GoalStatus.ACTIVE, GoalStatus.PROPOSED)
                       and npc.npc_id not in g.contributors
-                      and g.should_participate(npc, rng)]
+                      and g.decide_participation(npc, rng)]
         if not candidates:
             return None
         candidates.sort(key=lambda g: (

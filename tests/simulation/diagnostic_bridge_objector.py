@@ -186,7 +186,8 @@ def _build_provider(provider: str):
     sys.exit(1)
 
 
-async def run(days: int = DEFAULT_DAYS, provider: str = "mistral") -> None:
+async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
+              dump_path: str | None = None) -> None:
     llm, llm_label = _build_provider(provider)
 
     print("=" * 90)
@@ -522,6 +523,21 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral") -> None:
     print(f"\nElapsed: {elapsed:.1f}s ({elapsed/60:.1f} min)")
     print("=" * 90)
 
+    # Harvest the run's NPC memories + state for offline review / synopsis
+    # (python3 tests/simulation/run_memory.py <path>). Reusable across events.
+    if dump_path:
+        sys.path.insert(0, str(Path(__file__).parent))
+        from run_memory import dump_run_state
+        meta = {
+            "event": "repair_bridge", "provider": provider, "days": days,
+            "seed": SEED, "population": POPULATION,
+            "objector_id": objector.npc_id, "objector_name": objector.name,
+            "elapsed_s": round(elapsed),
+            "cycles": cycles,
+        }
+        written = dump_run_state(mgr, npcs, meta, dump_path)
+        print(f"[dump] wrote run memories/state -> {written}", flush=True)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
@@ -535,5 +551,11 @@ if __name__ == "__main__":
              "harness de-risking; 'gemma' = production engine, slow, for the "
              "confirmatory run.",
     )
+    parser.add_argument(
+        "--dump", default=None, metavar="PATH",
+        help="Write the run's NPC memories + state to PATH (JSON) at the end, "
+             "for review/synopsis via run_memory.py.",
+    )
     args = parser.parse_args()
-    asyncio.run(run(days=args.days, provider=args.provider))
+    asyncio.run(run(days=args.days, provider=args.provider,
+                    dump_path=args.dump))
