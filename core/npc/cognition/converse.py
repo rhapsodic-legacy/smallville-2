@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from core.npc.models import ActivityState
+from core.npc.persona import persona_system_prompt
 
 if TYPE_CHECKING:
     from core.npc.llm_client import LLMProvider
@@ -262,11 +263,17 @@ async def initiate_conversation(
             )
 
             message = await llm.complete(
-                system="You are a medieval NPC having a casual conversation.",
+                system=persona_system_prompt(
+                    npc,
+                    "You are starting a casual conversation in the "
+                    "street. Speak strictly in your own voice as "
+                    "described above.",
+                ),
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=100,
                 temperature=0.8,
                 purpose="conversation",
+                npc_id=npc.npc_id,
             )
         except Exception as e:
             logger.warning("Conversation initiation failed for %s: %s", npc.name, e)
@@ -446,11 +453,17 @@ async def continue_conversation(
 
         try:
             message = await llm.complete(
-                system="You are a medieval NPC responding in conversation.",
+                system=persona_system_prompt(
+                    npc,
+                    "You are replying in an ongoing conversation. "
+                    "Speak strictly in your own voice as described "
+                    "above.",
+                ),
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=100,
                 temperature=0.8,
                 purpose="conversation",
+                npc_id=npc.npc_id,
             )
         except Exception:
             if force_llm:

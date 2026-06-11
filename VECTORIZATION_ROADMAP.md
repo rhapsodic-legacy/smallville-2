@@ -110,7 +110,37 @@ on homogenised NPCs is 250k memories of mush.
 - `tests/simulation/diagnostic_bridge_objector.py --dump` — run + harvest.
 
 ## Status
-Research + foundation captured 2026-06-11. Not started. Recommended as a
-fresh-session arc on the stronger model. Layer-2 (in-sim attribution
-instrumentation) is deferred — much of the "why" is readable from the
-existing dump + cognition code first.
+Research + foundation captured 2026-06-11. **Foundation implemented the
+same day** (branch `npc-persona-foundation`):
+
+- `core/npc/persona.py` — `Persona` (concrete speech style + verbal tic
+  + temperament + 2 behaviour rules + value + fear + quirk + private
+  agenda) and `PersonaForge` (seeded, deal-without-replacement: a town
+  ≤ bank size shares no speech style or temperament; deliberately NOT
+  drawn from the manager's RNG so existing spawn sequences are
+  unperturbed). Personas serialise via `to_full_dict`.
+- `persona_system_prompt()` — the per-NPC character sheet is now the
+  SYSTEM prompt (the strongest conditioning slot, which previously
+  carried the town-wide "You are a medieval NPC" string) on every
+  NPC-voiced call: conversation initiate/respond, all three reflection
+  calls (the self-formation loop was previously completely
+  unconditioned), daily plan, replan, reaction, day/week summary,
+  bedtime self-review. The evolving `self_concept_summary()` rides
+  inside the sheet as the dynamic overlay (= Phase J.1/J.2, reshaped).
+  Clerk calls (fact extraction, note extraction, action classification)
+  intentionally stay unconditioned.
+- Evals: `tests/unit/test_persona.py` (determinism, distinctiveness,
+  round-trip, fallbacks), `tests/unit/test_persona_conditioning.py`
+  (every call site audited against MockProvider.call_log), and
+  `tests/simulation/eval_persona_conditioning.py` (whole-sim traffic
+  audit with CRITERIA VERDICT — catches future call sites shipping
+  unconditioned). At 8 days / pop 10: 2868/2868 NPC-voiced calls
+  conditioned; persona ≈ 34% of conversation prompt chars (from
+  ~5-10%). Unit suite 1370 green; `eval_foundation.py` and the
+  movement pipeline unregressed.
+
+**Measurement (in flight):** 6-day Mistral run matching the baseline
+config (seed 42, pop 10) → `runs/persona_foundation.json` →
+`npc_individuality.py` vs `runs/bridge_objector_retune.json`. Movement
+expected first in voice/near-dup churn, then self-keys and signal
+ratio. Layer-2 (in-sim attribution instrumentation) remains deferred.

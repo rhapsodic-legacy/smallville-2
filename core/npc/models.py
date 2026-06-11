@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from core.npc.persona import Persona
+
 
 class ActivityState(Enum):
     """What the NPC is currently doing — drives animation on the client."""
@@ -192,6 +194,13 @@ class NPC:
     personality: PersonalityTraits
     backstory: str
     occupation: str
+
+    # --- Persona (vectorization foundation) ---
+    # Concrete speech/behaviour/value/fear/quirk/agenda character sheet
+    # forged at spawn. Rendered by persona_system_prompt() as the
+    # dominant conditioning block of every cognition call. None for the
+    # player agent and legacy saves — callers degrade gracefully.
+    persona: "Persona | None" = None
 
     # --- Personality evolution ---
     # spawn_baseline is the Big-5 vector at creation — personality can
@@ -482,6 +491,7 @@ class NPC:
                 if self.spawn_baseline else None
             ),
             "self_concept": dict(self.self_concept),
+            "persona": self.persona.to_dict() if self.persona else None,
             "backstory": self.backstory,
             "home_x": self.home_x,
             "home_z": self.home_z,

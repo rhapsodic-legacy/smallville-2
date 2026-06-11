@@ -173,6 +173,7 @@ async def _summarise_with_llm(
 ) -> str:
     """Call the LLM to produce the day summary. Raises on failure."""
     from core.npc.llm_client import format_prompt
+    from core.npc.persona import persona_system_prompt
 
     events_block = _format_events_for_prompt(mems)
     name, occupation, personality, self_concept = _persona_for_prompt(npc)
@@ -186,15 +187,17 @@ async def _summarise_with_llm(
         events=events_block,
     )
     response = await llm.complete(
-        system=(
-            "You compress an NPC's day into a short first-person "
-            "reflection. Stay in character. Prefer voice and feeling "
-            "over event-listing."
+        system=persona_system_prompt(
+            npc,
+            "You are recalling your day to yourself, in your own "
+            "voice, before it fades. 2-4 sentences, first person. "
+            "Prefer voice and feeling over event-listing.",
         ),
         messages=[{"role": "user", "content": prompt}],
         max_tokens=200,
         temperature=0.4,
         purpose="day_summary",
+        npc_id=getattr(npc, "npc_id", None),
     )
     text = (response or "").strip()
     if not text:
@@ -380,6 +383,7 @@ async def _summarise_week_with_llm(
 ) -> str:
     """Call the LLM to produce the week summary. Raises on failure."""
     from core.npc.llm_client import format_prompt
+    from core.npc.persona import persona_system_prompt
 
     name, occupation, personality, self_concept = _persona_for_prompt(npc)
     day_block = _format_day_summaries_for_prompt(mems)
@@ -395,15 +399,17 @@ async def _summarise_week_with_llm(
         day_summaries=day_block,
     )
     response = await llm.complete(
-        system=(
-            "You compress a week of an NPC's life into a short "
-            "first-person character-arc reflection. Favour feeling "
-            "and shift over event-listing. Stay in character."
+        system=persona_system_prompt(
+            npc,
+            "You are looking back on your week — the character arc, "
+            "not the diary. 2-4 sentences, first person. Favour "
+            "feeling and shift over event-listing.",
         ),
         messages=[{"role": "user", "content": prompt}],
         max_tokens=280,
         temperature=0.4,
         purpose="week_summary",
+        npc_id=getattr(npc, "npc_id", None),
     )
     text = (response or "").strip()
     if not text:

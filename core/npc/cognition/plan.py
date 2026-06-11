@@ -13,6 +13,7 @@ import random
 from typing import TYPE_CHECKING
 
 from core.npc.models import ActivityState, ScheduleEntry
+from core.npc.persona import persona_system_prompt
 
 if TYPE_CHECKING:
     from core.npc.llm_client import LLMProvider
@@ -182,11 +183,20 @@ async def _llm_schedule(
         )
 
         response = await llm.complete(
-            system="You are a daily schedule planner for a medieval NPC.",
+            system=persona_system_prompt(
+                npc,
+                "You are writing your own daily schedule. Let your "
+                "character's habits, values, and private agenda shape "
+                "WHAT you choose to do — but follow the output format "
+                "in the message exactly: one activity per line with "
+                "time range, activity, location. No prose, no "
+                "in-character commentary.",
+            ),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=400,
             temperature=0.8,
             purpose="daily_plan",
+            npc_id=npc.npc_id,
         )
 
         # Pass the occupation template as the parser's fallback so that
@@ -632,11 +642,19 @@ async def decide_reaction(
         )
 
         response = await llm.complete(
-            system="You are deciding how a medieval NPC reacts to an observation.",
+            system=persona_system_prompt(
+                npc,
+                "You are deciding how to react to something you have "
+                "just noticed. Choose as YOUR character would — a "
+                "suspicious soul investigates or avoids, a gossip "
+                "approaches, a worrier observes. Reply with exactly "
+                "one of the words offered, nothing else.",
+            ),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=20,
             temperature=0.5,
             purpose="reaction",
+            npc_id=npc.npc_id,
         )
 
         reaction = response.strip().lower()
@@ -724,11 +742,18 @@ async def replan_schedule(
         )
 
         response = await llm.complete(
-            system="You are a medieval NPC re-evaluating your daily plan.",
+            system=persona_system_prompt(
+                npc,
+                "You are re-evaluating your remaining plans for "
+                "today. Decide as your character would, but follow "
+                "the output format in the message exactly — a "
+                "schedule, or NO_CHANGE.",
+            ),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=300,
             temperature=0.7,
             purpose="daily_plan",
+            npc_id=npc.npc_id,
         )
 
         response = response.strip()

@@ -307,10 +307,18 @@
   (NVIDIA ACE/Convai, Skyrim Mantella, roleplay-LLM, Stanford) → the
   foundation is a rich, CONCRETE, persistent persona (speech/behaviour
   rules, not Big-5 numbers) conditioning every cognition call = MEMORY_V2
-  Phase J re-opened and upgraded. First step: concrete distinctive
-  personas as the dominant conversation-prompt block, then re-measure
-  with `npc_individuality.py`. The 30-day emergence run is GATED behind
-  these metrics moving. Recommended as a fresh stronger-model arc.
+  Phase J re-opened and upgraded. **Foundation SHIPPED 2026-06-11**:
+  `core/npc/persona.py` (concrete speech/behaviour/value/fear/quirk/
+  agenda personas, seeded deal-without-replacement forge) + per-NPC
+  system prompts on every NPC-voiced cognition call (conversation,
+  reflection, planning, reaction, day/week summary, self-review).
+  Guarded by `tests/unit/test_persona*.py` (22 tests) and
+  `tests/simulation/eval_persona_conditioning.py` (traffic audit:
+  100% of NPC-voiced calls conditioned; persona ≈ 34% of conversation
+  prompt chars, up from ~5-10%). Re-measurement vs the
+  `runs/bridge_objector_retune.json` baseline via
+  `npc_individuality.py` decides the next step. The 30-day emergence
+  run stays GATED behind those metrics moving.
 - **AGENT_DIRECTION.md** — IoA-derived architectural philosophy
   (communal world-state + private experience + message-only
   propagation). Captured 2026-05-02. Not a roadmap to start now;
