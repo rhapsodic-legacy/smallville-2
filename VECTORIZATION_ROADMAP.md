@@ -192,3 +192,49 @@ mechanisms (not to "the parrot problem"):**
 **Gate status:** the 30-day emergence run STAYS GATED until at least
 one of the above moves; voice alone is necessary but not sufficient.
 Layer-2 (in-sim attribution instrumentation) remains deferred.
+
+## Emergent write-paths arc (2026-06-12, branch `emergent-write-paths`)
+
+Sources 1 and 2 above turned out to share one shape: **content-blind
+heuristics sat between the LLM and durable state, discarding the
+signal the persona now generates.** Sentiment was written ONLY by a
+talking-is-bonding baseline (+2 trust/+1 affection/+1 respect per
+conversation regardless of content — Jasper's six dissent speeches
+could never register); self_concept was written ONLY by regexes over
+other people's words (reflections never touched it).
+
+Shipped (the fix is widened pipes, not scripted outcomes):
+- **Tone pipe:** the post-conversation reflection (persona-
+  conditioned, zero new LLM calls) emits a `TONE:
+  warm|neutral|tense|hostile` verdict, parsed strictly and applied
+  ONE-directionally via `CONVERSATION_TONE_DELTAS`
+  (core/relationships/sentiment.py, data-driven) — asymmetric
+  relationships by design.
+- **Accusation pipe:** already-extracted accusations now apply
+  trust/respect penalties between participants
+  (`ACCUSATION_SENTIMENT_DELTAS`).
+- **Baseline shrink:** mere-contact deltas cut ~4×, respect removed
+  (earned via tone, never free); a personality clash can now net
+  negative.
+- **Self pipe:** the same reflection may emit `SELF:
+  <prefix>:<target>` when the insight asserts identity; validated
+  against an allow-list (hallucinated keys can never reach
+  self_concept) and routed through the existing contradiction-damped
+  `_apply_identity_claim` (+0.10/reflection — conviction comes from
+  repetition).
+- **Hardening:** Mistral 429 backoff-retry (a dropped reflection
+  starves exactly the new signal); external MemoryManagers get the
+  sentiment tracker attached; reflection max_tokens raised so
+  truncation can't eat the trailer lines.
+
+Evals: `tests/unit/test_write_paths.py` (22 — parser failure modes,
+one-directionality, clash-vs-baseline arithmetic, accusation wiring,
+end-to-end through `_persist_finished_conversations`). Suite 1392
+green; foundation/persona-conditioning/movement gates pass.
+
+**Measurement in flight:** 6-day Mistral, baseline config →
+`runs/write_paths.json`. Primary metrics: negative-sentiment % > 0
+and stdev up (Arc A), self-keys mean up from 1.0 (Arc B); voice
+similarity ≤ ~0.09 stands guard against regression. These two were
+the last unanswered homogenisation sources — if they move, the
+30-day gate question reopens with only volume policy outstanding.
