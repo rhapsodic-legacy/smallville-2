@@ -19,6 +19,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
+from core.relationships.sentiment import CONVERSATION_TONE_DELTAS
+
 if TYPE_CHECKING:
     from core.memory.manager import MemoryManager
     from core.npc.llm_client import LLMProvider
@@ -71,7 +73,17 @@ POST_CONVERSATION_PROMPT = (
     "What conclusion do you draw from this — about {other_name}, "
     "about yourself, about the town, or about someone who was "
     "mentioned? Name the specific insight, not just how you felt. "
-    "Answer in 1-2 sentences, in first person."
+    "Answer in 1-2 sentences, in first person.\n\n"
+    "Then, on its own final line, judge how the conversation "
+    "actually felt toward {other_name}, by YOUR standards — argument "
+    "may be bracing to one character and an insult to another:\n"
+    "TONE: warm|neutral|tense|hostile\n"
+    "If — and only if — your conclusion asserts something about WHO "
+    "YOU ARE (a stance, a role, a bond), add one more line:\n"
+    "SELF: <prefix>:<target>\n"
+    "where <prefix> is one of: role, opposes, supports, friend_of, "
+    "enemy_of, rival_of, skill, reputation. Omit the SELF line "
+    "otherwise."
 )
 
 ACTION_INTENT_PROMPT = (
@@ -89,6 +101,73 @@ ACTION_INTENT_PROMPT = (
     "thought with no immediate physical action), respond with:\n"
     "NO_ACTION"
 )
+
+# ---------- Reflection extras: tone + self-assertion (write paths) ----------
+# The emergent-write-paths arc: the persona-conditioned reflection is
+# where the LLM expresses friction and identity — these parse the two
+# structured trailer lines (TONE:, SELF:) the prompt requests, so that
+# signal lands in durable state instead of dying in episodic memory.
+
+VALID_TONES = ("warm", "neutral", "tense", "hostile")
+
+# Self-concept prefixes a reflection may assert about ONESELF. Matches
+# the phrase_map in NPC.self_concept_summary; `helped`/`built`/`joined`
+# are excluded — those are earned through I.4 goal completion, not
+# claimed in a moment of reflection.
+ALLOWED_SELF_PREFIXES = (
+    "role", "opposes", "supports", "friend_of", "enemy_of",
+    "rival_of", "skill", "reputation",
+)
+
+# One reflection nudges identity gently; conviction comes from
+# repetition, mirroring IDENTITY_DELTA/REINFORCEMENT_DELTA magnitudes.
+REFLECTION_CLAIM_DELTA = 0.10
+
+_SELF_KEY_RE = re.compile(r"^([a-z_]+)\s*:\s*([a-z0-9 _'\-]{1,40})$")
+
+
+def parse_reflection_extras(
+    text: str,
+) -> tuple[str, str | None, "IdentityClaim | None"]:
+    """Split an LLM reflection into (insight, tone, self_claim).
+
+    Scans for the `TONE:` and `SELF:` trailer lines, validates them
+    strictly (unknown tones and disallowed/malformed SELF keys are
+    dropped silently — a hallucinated key must never reach
+    self_concept), and returns the insight with those lines removed.
+    First valid occurrence of each wins.
+    """
+    tone: str | None = None
+    claim: IdentityClaim | None = None
+    kept: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("TONE:"):
+            if tone is None:
+                value = stripped.split(":", 1)[1].strip().lower()
+                first_word = value.split()[0].rstrip(".,;") if value else ""
+                if first_word in VALID_TONES:
+                    tone = first_word
+            continue
+        if upper.startswith("SELF:"):
+            if claim is None:
+                value = stripped.split(":", 1)[1].strip().lower()
+                match = _SELF_KEY_RE.match(value)
+                if match:
+                    prefix = match.group(1)
+                    target = re.sub(r"[\s\-]+", "_", match.group(2).strip())
+                    target = target.strip("_'")[:32]
+                    if prefix in ALLOWED_SELF_PREFIXES and target:
+                        claim = IdentityClaim(
+                            key=f"{prefix}:{target}",
+                            confidence_delta=REFLECTION_CLAIM_DELTA,
+                            source_text=text.strip()[:160],
+                        )
+            continue
+        kept.append(line)
+    return "\n".join(kept).strip(), tone, claim
+
 
 # Heuristic keywords that suggest an actionable intent (for non-LLM tiers)
 _ACTION_KEYWORDS = [
@@ -327,6 +406,8 @@ async def reflect_on_conversation(
     llm: LLMProvider,
     current_game_time: float,
     outcome: Any = None,
+    other_id: str = "",
+    claim_sink: Any = None,
 ) -> str | None:
     """
     Quick reflection after a conversation ends.
@@ -336,6 +417,13 @@ async def reflect_on_conversation(
     primed with its contents (commitments, accusations, relayed
     claims) so the NPC's conclusion actually engages with what
     happened rather than producing vague "I had a nice chat" lines.
+
+    Write paths (emergent-write-paths arc): the response's TONE
+    verdict is applied one-directionally to this NPC's sentiment
+    toward `other_id` (when given), and a SELF assertion is routed
+    through `claim_sink` — the manager passes its
+    `_inject_self_concept_delta` wrapper so reflection-born identity
+    gets the same contradiction damping as conversation claims.
     """
     from core.npc.llm_client import format_prompt
     from core.npc.cognition.tiers import get_tier_config
@@ -370,13 +458,41 @@ async def reflect_on_conversation(
                 "fears, and agenda.",
             ),
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=100,
+            # Headroom for the TONE/SELF trailer lines — they render
+            # LAST, so truncation would silently eat the write-path
+            # signal while leaving the insight looking fine.
+            max_tokens=160,
             temperature=0.7,
             purpose="reflection",
             npc_id=npc.npc_id,
         )
 
-        insight = insight.strip()
+        insight, tone, self_claim = parse_reflection_extras(insight.strip())
+
+        if tone and other_id:
+            sentiment = getattr(memory, "sentiment", None)
+            deltas = CONVERSATION_TONE_DELTAS.get(tone, {})
+            if sentiment is not None and deltas:
+                for dim, delta in deltas.items():
+                    sentiment.modify(
+                        npc.npc_id, other_id, dim, delta,
+                        game_time=current_game_time,
+                    )
+                logger.info(
+                    "TONE %s→%s: %s %s",
+                    npc.name, other_name, tone, deltas,
+                )
+
+        if self_claim is not None and claim_sink is not None:
+            self_claim.speaker = npc.name  # own assertion, not hearsay
+            try:
+                claim_sink(self_claim)
+            except Exception:
+                logger.exception(
+                    "Reflection self-claim sink failed for %s (%s)",
+                    npc.name, self_claim.key,
+                )
+
         if insight:
             await memory.record_reflection(
                 npc_id=npc.npc_id,
