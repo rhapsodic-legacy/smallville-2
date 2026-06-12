@@ -11,6 +11,7 @@ with 10 Tier 1/2 NPCs using the cognition router.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -91,12 +92,31 @@ class MistralProvider(LLMProvider):
         full_messages.extend(messages)
 
         try:
-            response = await client.chat.complete_async(
-                model=model,
-                messages=full_messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
+            response = None
+            # Bounded retry on 429: Mistral rate-limits intermittently
+            # under sim load, and a dropped call doesn't fail evenly —
+            # reflections fall back to templates that carry none of
+            # the TONE/SELF write-path signal, silently starving the
+            # exact metrics a run exists to measure.
+            for attempt in range(4):
+                try:
+                    response = await client.chat.complete_async(
+                        model=model,
+                        messages=full_messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    break
+                except Exception as e:
+                    is_rate_limit = "429" in str(e) or "rate_limit" in str(e)
+                    if not is_rate_limit or attempt == 3:
+                        raise
+                    backoff = 2.0 * (2 ** attempt)  # 2s, 4s, 8s
+                    logger.warning(
+                        "Mistral 429 [%s], retry %d/3 in %.0fs",
+                        purpose, attempt + 1, backoff,
+                    )
+                    await asyncio.sleep(backoff)
 
             text = response.choices[0].message.content
             input_tokens = response.usage.prompt_tokens
