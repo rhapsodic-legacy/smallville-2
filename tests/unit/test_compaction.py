@@ -294,6 +294,7 @@ class _StubLLM:
 
     async def complete(
         self, *, system, messages, max_tokens, temperature, purpose,
+        **kwargs,
     ) -> str:
         self.last_prompt = messages[0]["content"]
         assert purpose in ("day_summary", "week_summary")

@@ -3,10 +3,14 @@
 from core.npc.models import NPC, PersonalityTraits, ActivityState, Direction, ScheduleEntry
 from core.npc.manager import NPCManager
 from core.npc.llm_client import ClaudeProvider, MockProvider, LLMProvider
+from core.npc.persona import Persona, PersonaForge, persona_system_prompt
 
 __all__ = [
     "NPC",
     "PersonalityTraits",
+    "Persona",
+    "PersonaForge",
+    "persona_system_prompt",
     "ActivityState",
     "Direction",
     "ScheduleEntry",

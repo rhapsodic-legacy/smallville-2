@@ -434,6 +434,7 @@ async def _run_review_with_llm(
     """Call the LLM once; raise on empty/failure so the caller can
     fall back cleanly."""
     from core.npc.llm_client import format_prompt
+    from core.npc.persona import persona_system_prompt
 
     name, occupation, personality, self_concept = _persona_for_prompt(npc)
     prompt = format_prompt(
@@ -448,15 +449,19 @@ async def _run_review_with_llm(
         day_summary=_format_day_summary(day_summary),
     )
     response = await llm.complete(
-        system=(
-            "You run an NPC's bedtime self-review in first person. "
-            "Be honest, specific, and short — this is them talking "
-            "to themselves before sleep, not writing a diary."
+        system=persona_system_prompt(
+            npc,
+            "You are taking honest stock of your open matters before "
+            "sleep, talking to yourself in your own voice — not "
+            "writing a diary. Judge your progress as YOUR character "
+            "would: by your own values and fears. Follow the exact "
+            "block format given in the message.",
         ),
         messages=[{"role": "user", "content": prompt}],
         max_tokens=320,
         temperature=0.4,
         purpose="self_review",
+        npc_id=getattr(npc, "npc_id", None),
     )
     text = (response or "").strip()
     if not text:

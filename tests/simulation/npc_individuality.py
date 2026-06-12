@@ -38,6 +38,51 @@ def _self_keys(npc: dict) -> set:
     return set(npc["self_concept"].keys())
 
 
+def _own_utterances(npc: dict) -> list[str]:
+    """Extract this NPC's OWN dialogue lines from conversation memories.
+
+    Conversation memories store exchanges as
+    'Name: text | Other: text | ...' — we keep only the segments this
+    NPC spoke. This is the raw material for the voice metrics: what
+    the NPC actually SAYS, not what they heard.
+    """
+    prefix = f"{npc['name']}:"
+    lines: list[str] = []
+    for m in npc["memories"]:
+        if m.get("category") not in CONVO_CATS:
+            continue
+        for seg in m["description"].split(" | "):
+            seg = seg.strip()
+            if seg.startswith("Had a conversation with"):
+                # leading wrapper before the first speaker segment
+                _, _, seg = seg.partition(". ")
+                seg = seg.strip()
+            if seg.startswith(prefix):
+                lines.append(seg[len(prefix):].strip().lower())
+    return lines
+
+
+def _trigram_profile(lines: list[str]) -> Counter:
+    """Token-trigram counts over an NPC's own utterances. Trigrams (not
+    single tokens) so shared topic words don't read as shared voice —
+    voice lives in phrasing."""
+    import re
+    profile: Counter = Counter()
+    for line in lines:
+        toks = re.findall(r"[a-z']+", line)
+        profile.update(zip(toks, toks[1:], toks[2:]))
+    return profile
+
+
+def _cosine(a: Counter, b: Counter) -> float:
+    if not a or not b:
+        return 0.0
+    dot = sum(v * b[k] for k, v in a.items() if k in b)
+    na = sum(v * v for v in a.values()) ** 0.5
+    nb = sum(v * v for v in b.values()) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
 def _near_dup_rate(npc: dict) -> float:
     if not npc["memories"]:
         return 0.0
@@ -116,6 +161,41 @@ def measure(path: str) -> dict:
     print("\n5. BEHAVIOURAL diversity")
     print(f"  occupations: {dict(occ)}; distinct long-term goals: {len(goals)}")
 
+    # ---- 6. Voice distinctiveness (utterance-level) ----
+    # Added 2026-06-11: the persona arc's predicted FIRST effect is
+    # distinct voices, which sections 1-5 cannot see (they measure
+    # memory composition, not speech). Voice = each NPC's own dialogue
+    # lines, compared as token-trigram profiles. High pairwise cosine
+    # = the town speaks with one voice (the parrot signature: identical
+    # greeting scaffolds, shared stock phrasing).
+    print("\n6. VOICE distinctiveness (each NPC's own dialogue lines)")
+    profiles = []
+    for npc in npcs:
+        lines = _own_utterances(npc)
+        profiles.append((npc["name"], _trigram_profile(lines), len(lines)))
+    voice_cos = [
+        _cosine(a, b)
+        for (_, a, _), (_, b, _) in combinations(profiles, 2)
+        if a and b
+    ]
+    mean_voice = statistics.mean(voice_cos) if voice_cos else 0.0
+    if voice_cos:
+        for name, profile, n_lines in profiles:
+            others = [
+                _cosine(profile, p) for nm, p, _ in profiles
+                if nm != name and p and profile
+            ]
+            sims = statistics.mean(others) if others else 0.0
+            top = ", ".join(
+                " ".join(t) for t, _ in profile.most_common(2)
+            ) or "-"
+            print(f"  {name:12s} lines={n_lines:4d} "
+                  f"sim-to-town={sims:.2f}  signature: {top}")
+        print(f"  -> mean pairwise voice similarity: {mean_voice:.2f}  "
+              f"(1.0 = one shared voice, ~0 = fully distinct voices)")
+    else:
+        print("  (no own-utterance dialogue found in dump)")
+
     # ---- Verdict: localise the homogenisation ----
     print("\nVERDICT — sources of homogenisation")
     sources = []
@@ -132,6 +212,9 @@ def measure(path: str) -> dict:
     if statistics.mean(dup_rates) > 0.15:
         sources.append(f"CHURN: {statistics.mean(dup_rates):.0%} near-duplicate "
                        f"memories")
+    if voice_cos and mean_voice > 0.20:
+        sources.append(f"UNIFORM VOICE: mean utterance similarity "
+                       f"{mean_voice:.2f} — the town speaks alike")
     for s in sources:
         print(f"  ! {s}")
     if sources:
@@ -149,6 +232,7 @@ def measure(path: str) -> dict:
         "self_overlap": round(mean_jac, 2),
         "sentiment_stdev": round(sdev, 1),
         "dup_rate_mean": round(statistics.mean(dup_rates), 3),
+        "voice_similarity": round(mean_voice, 3),
         "homogenisation_sources": len(sources),
     }
 

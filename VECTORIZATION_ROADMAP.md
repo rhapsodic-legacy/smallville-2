@@ -99,7 +99,8 @@ self-concept richness as reflections become self-relevant.
 
 No "Stanford-worthy" claim until `npc_individuality.py` numbers move:
 signal-ratio up (from 3%), self-keys up (from 1.1), sentiment
-differentiating (from 0% negative), near-dup churn down (from 31%). The
+differentiating (from 0% negative), near-dup churn down (from 31%),
+voice similarity down (from 0.33 — section 6, added 2026-06-11). The
 30-day emergence run is gated behind meaningful movement — a 30-day run
 on homogenised NPCs is 250k memories of mush.
 
@@ -110,7 +111,84 @@ on homogenised NPCs is 250k memories of mush.
 - `tests/simulation/diagnostic_bridge_objector.py --dump` — run + harvest.
 
 ## Status
-Research + foundation captured 2026-06-11. Not started. Recommended as a
-fresh-session arc on the stronger model. Layer-2 (in-sim attribution
-instrumentation) is deferred — much of the "why" is readable from the
-existing dump + cognition code first.
+Research + foundation captured 2026-06-11. **Foundation implemented the
+same day** (branch `npc-persona-foundation`):
+
+- `core/npc/persona.py` — `Persona` (concrete speech style + verbal tic
+  + temperament + 2 behaviour rules + value + fear + quirk + private
+  agenda) and `PersonaForge` (seeded, deal-without-replacement: a town
+  ≤ bank size shares no speech style or temperament; deliberately NOT
+  drawn from the manager's RNG so existing spawn sequences are
+  unperturbed). Personas serialise via `to_full_dict`.
+- `persona_system_prompt()` — the per-NPC character sheet is now the
+  SYSTEM prompt (the strongest conditioning slot, which previously
+  carried the town-wide "You are a medieval NPC" string) on every
+  NPC-voiced call: conversation initiate/respond, all three reflection
+  calls (the self-formation loop was previously completely
+  unconditioned), daily plan, replan, reaction, day/week summary,
+  bedtime self-review. The evolving `self_concept_summary()` rides
+  inside the sheet as the dynamic overlay (= Phase J.1/J.2, reshaped).
+  Clerk calls (fact extraction, note extraction, action classification)
+  intentionally stay unconditioned.
+- Evals: `tests/unit/test_persona.py` (determinism, distinctiveness,
+  round-trip, fallbacks), `tests/unit/test_persona_conditioning.py`
+  (every call site audited against MockProvider.call_log), and
+  `tests/simulation/eval_persona_conditioning.py` (whole-sim traffic
+  audit with CRITERIA VERDICT — catches future call sites shipping
+  unconditioned). At 8 days / pop 10: 2868/2868 NPC-voiced calls
+  conditioned; persona ≈ 34% of conversation prompt chars (from
+  ~5-10%). Unit suite 1370 green; `eval_foundation.py` and the
+  movement pipeline unregressed.
+
+**Measurement (2026-06-11, 6-day Mistral, baseline config, seed 42,
+pop 10 → `runs/persona_foundation.json`):**
+
+The original Layer-1 suite couldn't see the predicted first effect —
+voice — so a section 6 (utterance-level voice distinctiveness:
+token-trigram profiles over each NPC's OWN dialogue lines, pairwise
+cosine) was added to `npc_individuality.py` and run on BOTH dumps.
+Same instrument-first lesson as the foundation rebuild.
+
+| metric | baseline | persona run |
+|---|---|---|
+| voice similarity (1.0 = one voice) | **0.33** | **0.09** (−73%) |
+| near-duplicate churn | 31% | 27% |
+| signal ratio | 3.4% | 3.9% |
+| self-concept keys / NPC | 1.1 | 1.0 (flat) |
+| negative sentiment | 0% | 0% |
+
+Baseline top "signatures" were shared stage business ("brow with a",
+"with a warm smile" — multiple NPCs' top trigrams identical). In the
+persona run every NPC's emergent signature IS their forged tic:
+Jasper "mark my words", Kira "saints preserve us", Voss "not lie to
+you", Mira "as my mother used", Dorian "do you follow me", Helena
+"wednesday it was". Voice held for all 6 days — the sustained-
+character problem the research warns about did not appear.
+
+The run's pre-registered bridge-objector verdict (first under
+non-deterministic cognition on the rebuilt foundation):
+**EMERGENCE-RICH** — C1 voiced dissent PASS (6 in-character
+opposition lines), C3 social consequence PASS (objector sentiment
+drift −5.9 relative to town), C4 organic belief formation PASS (3
+NPCs formed `built:bridge`). C2 indecision OUT-OF-BAND (join rate
+0.50 vs 0.05–0.30 band — only 2 cycles, small n; watch the sticky-
+participation interaction). Meta-verdict: AGENT_DIRECTION rebuild NOT
+indicated by this run.
+
+**Remaining homogenisation sources, now attributable to specific
+mechanisms (not to "the parrot problem"):**
+1. *Self barely forms* (1.0 keys, flat) — persona conditioning can't
+   move this directly: `self_concept` is only written by dialogue-
+   claim extraction and Phase I.4/I.5 reinforcement/erosion. Next
+   lever: the self-concept WRITE path (e.g. persona-relevant
+   reflections feeding deltas), not more prompt conditioning.
+2. *Zero negative sentiment* — relative differentiation now exists
+   (C3) but absolute negativity never appears. Next lever:
+   `SentimentTracker` update rules (positive-bias audit), per the
+   standing watch item.
+3. *Volume drowning* (3.9% signal) — untouched by design; the
+   conversation-volume policy is its own decision.
+
+**Gate status:** the 30-day emergence run STAYS GATED until at least
+one of the above moves; voice alone is necessary but not sufficient.
+Layer-2 (in-sim attribution instrumentation) remains deferred.

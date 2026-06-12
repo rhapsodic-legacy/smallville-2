@@ -367,7 +367,7 @@ transcript forever.
       Tuning watchlist for future scope (separate feature phase,
       not a fix for I.6).
 
-## Phase J — Unified persona snapshot (PARKED)
+## Phase J — Unified persona snapshot (RE-OPENED, RESHAPED 2026-06-11)
 > Polish. Ties the whole memory stack + personality + objectives into
 > one coherent conditioning signal.
 >
@@ -377,6 +377,20 @@ transcript forever.
 > emergence-in-a-vacuum. J stays frozen until long-form sims on the
 > weighted-participation gate produce evidence that personas are what
 > the stack is actually missing.
+>
+> **Re-opened 2026-06-11** by the vectorization arc
+> (VECTORIZATION_ROADMAP.md): the Layer-1 individuality metrics
+> supplied the missing evidence (SYSTEMIC homogenisation; the persona
+> signal thin AND drowned). Shipped in an upgraded form: instead of
+> aggregating Big-5 + self_concept into a snapshot dataclass,
+> `core/npc/persona.py` forges a CONCRETE character sheet at spawn
+> (speech rules, temperament, behaviour rules, value, fear, quirk,
+> private agenda) and `persona_system_prompt()` renders it + the live
+> `self_concept_summary()` as the per-NPC SYSTEM prompt on every
+> NPC-voiced cognition call. That delivers the intent of J.1/J.2 with
+> concrete specificity rather than trait numbers. J.3 (persona-aware
+> retrieval ranking) and J.4 (persona delta / character arc) remain
+> open, gated on the post-change `npc_individuality.py` measurement.
 
 - [ ] J.1 `NPC.persona_snapshot: PersonaSnapshot` — dataclass
       aggregating: Big-5 vector, top-k self_concept entries, active

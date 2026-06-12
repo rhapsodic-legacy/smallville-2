@@ -339,6 +339,7 @@ async def reflect_on_conversation(
     """
     from core.npc.llm_client import format_prompt
     from core.npc.cognition.tiers import get_tier_config
+    from core.npc.persona import persona_system_prompt
 
     config = get_tier_config(npc.cognition_tier)
     if not config.uses_llm:
@@ -361,11 +362,18 @@ async def reflect_on_conversation(
         )
 
         insight = await llm.complete(
-            system="You are a medieval NPC reflecting on a conversation.",
+            system=persona_system_prompt(
+                npc,
+                "You are reflecting privately on a conversation you "
+                "just had. Draw the conclusion YOUR character would "
+                "draw — filtered through your temperament, values, "
+                "fears, and agenda.",
+            ),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100,
             temperature=0.7,
             purpose="reflection",
+            npc_id=npc.npc_id,
         )
 
         insight = insight.strip()
@@ -398,6 +406,8 @@ async def _generate_focal_questions(
     llm: LLMProvider,
 ) -> list[str]:
     """Generate reflection focal points from recent experiences."""
+    from core.npc.persona import persona_system_prompt
+
     try:
         prompt = FOCAL_POINT_PROMPT.format(
             name=npc.name,
@@ -406,11 +416,18 @@ async def _generate_focal_questions(
         )
 
         response = await llm.complete(
-            system="You are helping a medieval NPC identify themes for reflection.",
+            system=persona_system_prompt(
+                npc,
+                "You are deciding what questions about your recent "
+                "experiences matter enough to think on — the ones "
+                "YOUR character, with these values and fears, would "
+                "actually dwell on.",
+            ),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=200,
             temperature=0.7,
             purpose="reflection",
+            npc_id=npc.npc_id,
         )
 
         lines = [
@@ -433,6 +450,8 @@ async def _synthesise_insight(
     llm: LLMProvider,
 ) -> str | None:
     """Generate an insight for a single focal point."""
+    from core.npc.persona import persona_system_prompt
+
     try:
         prompt = INSIGHT_PROMPT.format(
             name=npc.name,
@@ -443,11 +462,18 @@ async def _synthesise_insight(
         )
 
         response = await llm.complete(
-            system="You are a medieval NPC synthesising an insight from memories.",
+            system=persona_system_prompt(
+                npc,
+                "You are synthesising an insight from your own "
+                "memories. Conclude what YOUR character would "
+                "conclude — coloured by your temperament, values, "
+                "and private agenda.",
+            ),
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100,
             temperature=0.7,
             purpose="reflection",
+            npc_id=npc.npc_id,
         )
 
         return response.strip() or None

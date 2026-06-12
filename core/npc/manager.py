@@ -18,6 +18,7 @@ from core.npc.models import (
     Commitment, CommitmentStatus,
     OCCUPATION_DEFAULTS, FIRST_NAMES, BACKSTORY_TEMPLATES,
 )
+from core.npc.persona import PersonaForge
 from core.npc.seed_memories import seed_population_memories
 from core.npc.llm_client import LLMProvider, MockProvider
 from core.npc.cognition.tiers import (
@@ -112,6 +113,9 @@ class NPCManager:
         self.deterministic = deterministic
         self._seed = seed
         self.rng = random.Random(seed)
+        # Separate seeded RNG: forging personas from self.rng would
+        # shift every downstream draw and invalidate eval baselines.
+        self._persona_forge = PersonaForge.from_seed(seed)
         self.npcs: list[NPC] = []
         self._npc_map: dict[str, NPC] = {}
 
@@ -401,6 +405,7 @@ class NPCManager:
             age=age,
             personality=personality,
             spawn_baseline=spawn_baseline,
+            persona=self._persona_forge.forge(occupation),
             backstory=backstory,
             occupation=occupation,
             x=home_x,
