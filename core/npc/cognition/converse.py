@@ -495,34 +495,51 @@ async def continue_conversation(
     return True
 
 
+# Mere-contact baseline (emergent-write-paths arc: deliberately small).
+# These used to be the ONLY sentiment write and were large enough that
+# every conversation netted positive regardless of content — the LLM's
+# friction could never register. Content now carries the signal via the
+# post-conversation TONE verdict (reflection.py → CONVERSATION_TONE_
+# DELTAS) and accusation penalties; this is just "we spent time
+# together", and a personality clash or a single tense exchange can
+# outweigh it.
+_BASE_TRUST = 0.5
+_TRUST_PER_EXCHANGE = 0.1
+_BASE_AFFECTION = 0.3
+_AFFECTION_PER_EXCHANGE = 0.1
+_RESONANCE_SHARED_OCCUPATION = 2.0
+_RESONANCE_PER_SHARED_SKILL = 0.75
+
+
 def _conversation_sentiment_deltas(
     npc: NPC, other: NPC, exchange_count: int,
 ) -> dict[str, float]:
-    """Compute sentiment changes from a conversation using heuristics.
+    """Compute the mere-contact sentiment baseline for a conversation.
 
-    Trust: grows with every conversation (people who talk build trust).
-    Affection: grows slightly per exchange (time spent = bonding).
-    Resonance: boost if shared occupation or overlapping skills.
-    Respect: small boost — you respect someone who takes time to talk.
+    Trust/affection: small drift from time spent together.
+    Resonance: shared occupation or overlapping skills.
+    Respect: NOT given for free — it is earned through tone and acts.
+    Content-aware deltas (how the conversation actually went) are
+    applied separately by the post-conversation reflection's TONE
+    verdict and by accusation penalties.
     """
     deltas: dict[str, float] = {}
 
-    # Trust: base +2, +0.5 per exchange beyond the first
-    deltas["trust"] = 2.0 + max(0, exchange_count - 1) * 0.5
-
-    # Affection: +1 base, +0.3 per exchange
-    deltas["affection"] = 1.0 + exchange_count * 0.3
-
-    # Respect: small flat boost
-    deltas["respect"] = 1.0
+    deltas["trust"] = (
+        _BASE_TRUST + max(0, exchange_count - 1) * _TRUST_PER_EXCHANGE
+    )
+    deltas["affection"] = (
+        _BASE_AFFECTION + exchange_count * _AFFECTION_PER_EXCHANGE
+    )
+    deltas["respect"] = 0.0  # clash penalties below may push it negative
 
     # Resonance: shared occupation = strong, overlapping skills = moderate
     if npc.occupation == other.occupation:
-        deltas["resonance"] = 5.0
+        deltas["resonance"] = _RESONANCE_SHARED_OCCUPATION
     else:
         shared_skills = set(npc.skills.keys()) & set(other.skills.keys())
         if shared_skills:
-            deltas["resonance"] = len(shared_skills) * 1.5
+            deltas["resonance"] = len(shared_skills) * _RESONANCE_PER_SHARED_SKILL
 
     # --- Negative signals (personality clashes) ---
     # Large agreeableness gap → friction (blunt vs cooperative)
@@ -540,7 +557,8 @@ def _conversation_sentiment_deltas(
     if open_gap > 0.6:
         deltas["respect"] -= open_gap * 0.5  # up to -0.5
 
-    return deltas
+    # Drop zero deltas so sparse sentiment storage stays sparse.
+    return {k: v for k, v in deltas.items() if abs(v) > 1e-9}
 
 
 async def end_conversation(

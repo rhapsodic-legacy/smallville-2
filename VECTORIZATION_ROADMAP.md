@@ -192,3 +192,93 @@ mechanisms (not to "the parrot problem"):**
 **Gate status:** the 30-day emergence run STAYS GATED until at least
 one of the above moves; voice alone is necessary but not sufficient.
 Layer-2 (in-sim attribution instrumentation) remains deferred.
+
+## Emergent write-paths arc (2026-06-12, branch `emergent-write-paths`)
+
+Sources 1 and 2 above turned out to share one shape: **content-blind
+heuristics sat between the LLM and durable state, discarding the
+signal the persona now generates.** Sentiment was written ONLY by a
+talking-is-bonding baseline (+2 trust/+1 affection/+1 respect per
+conversation regardless of content — Jasper's six dissent speeches
+could never register); self_concept was written ONLY by regexes over
+other people's words (reflections never touched it).
+
+Shipped (the fix is widened pipes, not scripted outcomes):
+- **Tone pipe:** the post-conversation reflection (persona-
+  conditioned, zero new LLM calls) emits a `TONE:
+  warm|neutral|tense|hostile` verdict, parsed strictly and applied
+  ONE-directionally via `CONVERSATION_TONE_DELTAS`
+  (core/relationships/sentiment.py, data-driven) — asymmetric
+  relationships by design.
+- **Accusation pipe:** already-extracted accusations now apply
+  trust/respect penalties between participants
+  (`ACCUSATION_SENTIMENT_DELTAS`).
+- **Baseline shrink:** mere-contact deltas cut ~4×, respect removed
+  (earned via tone, never free); a personality clash can now net
+  negative.
+- **Self pipe:** the same reflection may emit `SELF:
+  <prefix>:<target>` when the insight asserts identity; validated
+  against an allow-list (hallucinated keys can never reach
+  self_concept) and routed through the existing contradiction-damped
+  `_apply_identity_claim` (+0.10/reflection — conviction comes from
+  repetition).
+- **Hardening:** Mistral 429 backoff-retry (a dropped reflection
+  starves exactly the new signal); external MemoryManagers get the
+  sentiment tracker attached; reflection max_tokens raised so
+  truncation can't eat the trailer lines.
+
+Evals: `tests/unit/test_write_paths.py` (22 — parser failure modes,
+one-directionality, clash-vs-baseline arithmetic, accusation wiring,
+end-to-end through `_persist_finished_conversations`). Suite 1392
+green; foundation/persona-conditioning/movement gates pass.
+
+**Measurement (2026-06-13, 6-day Mistral, baseline config →
+`runs/write_paths.json`):**
+
+| metric | persona run | write-paths run | read |
+|---|---|---|---|
+| self-concept keys / NPC | 1.0 (2/10 empty) | **9.5 (0/10 empty)** | Arc B: strong win |
+| cross-NPC self overlap | 0.14 | **0.03** | selves more distinct, not just bigger |
+| sentiment mean | +41.5 | **+14.5** | runaway warmth broken |
+| sentiment min disposition | +6.2 | **−1.7** | first sub-zero relationships ever |
+| cool/neutral band (−5..+5) | 0% | **26%** | friction registers… |
+| negative (<−5) | 0% | **0%** | …as withheld warmth, not dislike |
+| voice similarity | 0.09 | **0.07** | regression guard held |
+| distinct long-term goals | 12 | **23** | richer selves → more varied goals |
+| homogenisation verdict | SYSTEMIC (4) | **MULTI-FACTOR (2)** | two sources resolved |
+
+Bridge-objector pre-registered verdict: **EMERGENCE-RICH** again —
+C4 organic belief formation jumped from 3 NPCs to **7** (several with
+multiple identity keys), C3 social consequence PASS (objector −3.4
+relative). C1 PASS (3 dissent lines), C2 still OUT-OF-BAND (join rate
+0.50, n=2 cycles).
+
+**Arc B (self-formation): unambiguous win.** 1.0→9.5 keys, empty
+selves gone, cross-NPC overlap *dropped* to 0.03 — fuller AND more
+individuated. Routing reflection-asserted identity through the
+contradiction-damped applier worked. *Watch-item:* NPCs accrue
+near-synonymous keys (`role:bridge`/`role:bridgekeeper`/
+`role:bridge_warden`), so 9.5 is partly within-NPC redundancy; key
+canonicalisation is the obvious refinement (cross-NPC distinctness is
+genuine, so it doesn't undermine the result).
+
+**Arc A (sentiment): real but partial.** Pre-registered criterion
+(negative % > 0 AND stdev up) was NOT literally met — negative stayed
+0%, stdev fell (distribution compressed toward zero rather than
+spreading). But the *intent* — break uniform warmth — substantially
+landed: mean halved, a 26% cool band opened from nothing, min went
+sub-zero, and the metric stopped flagging UNIFORM SENTIMENT.
+Diagnosis (from `runs/write_paths.json`): **0/90 relationships hold
+even one negative dimension.** Mechanism — positives apply on *every*
+conversation (baseline + frequent warm tone) and dwarf the rare
+bounded negatives; mere-contact bonding paints back over friction.
+Decay (~2%/day) is negligible over 6 days, so the eroder is volume,
+not time. → **Arc-A tuning pass** (branch `arc-a-negative-sentiment`):
+larger hostile/tense magnitudes + fear; stop mere-contact bonding
+from rebuilding a dimension that's currently negative; mild
+asymmetric decay for the 30-day horizon.
+
+**Gate status:** Arc B resolved source 1; Arc A partially resolved
+source 2 (uniform warmth broken, genuine dislike not yet). 30-day run
+still gated — pending the Arc-A tuning producing true negative
+sentiment. Source 3 (volume drowning, 5%) untouched by design.

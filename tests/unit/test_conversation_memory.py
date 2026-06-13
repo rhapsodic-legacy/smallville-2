@@ -14,6 +14,9 @@ from core.npc.cognition.converse import (
     end_conversation, initiate_conversation,
     _active_conversations, Conversation, ConversationExchange,
     _conversation_sentiment_deltas,
+    _BASE_TRUST, _TRUST_PER_EXCHANGE,
+    _BASE_AFFECTION, _AFFECTION_PER_EXCHANGE,
+    _RESONANCE_SHARED_OCCUPATION, _RESONANCE_PER_SHARED_SKILL,
 )
 from core.npc.llm_client import MockProvider
 from core.memory.manager import MemoryManager
@@ -296,7 +299,7 @@ class TestConversationSentiment:
         a = _make_npc("a_0", "A", "blacksmith")
         b = _make_npc("b_0", "B", "blacksmith")
         deltas = _conversation_sentiment_deltas(a, b, 2)
-        assert deltas.get("resonance", 0) == 5.0
+        assert deltas.get("resonance", 0) == _RESONANCE_SHARED_OCCUPATION
 
     def test_resonance_shared_skills(self):
         """NPCs with overlapping skills should get moderate resonance."""
@@ -305,8 +308,8 @@ class TestConversationSentiment:
         b = _make_npc("b_0", "B", "merchant",
                       skills={"trading": 0.8, "diplomacy": 0.5})
         deltas = _conversation_sentiment_deltas(a, b, 2)
-        # 1 shared skill (trading) * 1.5 = 1.5
-        assert deltas.get("resonance", 0) == 1.5
+        # 1 shared skill (trading) * the per-skill constant
+        assert deltas.get("resonance", 0) == _RESONANCE_PER_SHARED_SKILL
 
     def test_no_resonance_different_everything(self):
         """NPCs with no overlap should get no resonance."""
@@ -353,57 +356,61 @@ class TestConversationSentiment:
         assert deltas["respect"] < 1.0
 
     def test_trust_formula_precision(self):
-        """Trust = 2.0 + max(0, count-1) * 0.5."""
-        a = _make_npc("a_0", "A")
-        b = _make_npc("b_0", "B")
-        d1 = _conversation_sentiment_deltas(a, b, 1)
-        d3 = _conversation_sentiment_deltas(a, b, 3)
-        d5 = _conversation_sentiment_deltas(a, b, 5)
-        assert d1["trust"] == pytest.approx(2.0)
-        assert d3["trust"] == pytest.approx(3.0)
-        assert d5["trust"] == pytest.approx(4.0)
-
-    def test_affection_formula_precision(self):
-        """Affection = 1.0 + count * 0.3."""
-        a = _make_npc("a_0", "A")
-        b = _make_npc("b_0", "B")
-        d1 = _conversation_sentiment_deltas(a, b, 1)
-        d4 = _conversation_sentiment_deltas(a, b, 4)
-        assert d1["affection"] == pytest.approx(1.3)
-        assert d4["affection"] == pytest.approx(2.2)
-
-    def test_respect_always_one(self):
-        """Respect base is flat +1.0 regardless of exchange count."""
+        """Trust = base + max(0, count-1) * per-exchange (mere-contact
+        baseline, deliberately small — content carries the signal via
+        the TONE write path)."""
         a = _make_npc("a_0", "A")
         b = _make_npc("b_0", "B")
         for count in (1, 3, 5):
             d = _conversation_sentiment_deltas(a, b, count)
-            assert d["respect"] == pytest.approx(1.0)
+            expected = _BASE_TRUST + max(0, count - 1) * _TRUST_PER_EXCHANGE
+            assert d["trust"] == pytest.approx(expected)
+
+    def test_affection_formula_precision(self):
+        """Affection = base + count * per-exchange."""
+        a = _make_npc("a_0", "A")
+        b = _make_npc("b_0", "B")
+        for count in (1, 4):
+            d = _conversation_sentiment_deltas(a, b, count)
+            expected = _BASE_AFFECTION + count * _AFFECTION_PER_EXCHANGE
+            assert d["affection"] == pytest.approx(expected)
+
+    def test_respect_not_given_for_free(self):
+        """Respect is earned via tone/acts, never from mere contact —
+        for a compatible pair it is absent (zero deltas filtered);
+        a clash may push it negative."""
+        a = _make_npc("a_0", "A")
+        b = _make_npc("b_0", "B")
+        for count in (1, 3, 5):
+            d = _conversation_sentiment_deltas(a, b, count)
+            assert d.get("respect", 0.0) <= 0.0
 
     def test_all_expected_keys_present(self):
         """Delta dict should always contain trust, affection, respect."""
         a = _make_npc("a_0", "A")
         b = _make_npc("b_0", "B")
         d = _conversation_sentiment_deltas(a, b, 2)
-        for key in ("trust", "affection", "respect"):
+        for key in ("trust", "affection"):
             assert key in d
 
-    def test_negative_signals_cannot_flip_sign(self):
-        """Negative personality clash should reduce but not flip deltas negative
-        for a single short conversation."""
-        a = _make_npc("a_0", "A")
-        b = _make_npc("b_0", "B")
-        # Maximum clash: extremes on all dimensions
+    def test_max_clash_can_net_negative(self):
+        """Write-paths arc: the contact baseline is small by design, so
+        a maximum personality clash CAN flip the net negative — friction
+        no longer loses to talking-is-bonding by construction."""
+        a = _make_npc("a_0", "A", "blacksmith")
+        b = _make_npc("b_0", "B", "priest")
+        a.skills = {}
+        b.skills = {}
+        # Maximum clash: extremes on all dimensions, no shared trade
         a.personality.agreeableness = 1.0
         b.personality.agreeableness = 0.0
         a.personality.neuroticism = 1.0
         a.personality.openness = 0.0
         b.personality.openness = 1.0
         d = _conversation_sentiment_deltas(a, b, 2)
-        # With 2 exchanges, trust base=2.5, affection base=1.6, respect=1.0
-        # Penalties should reduce but not make negative
-        assert d["trust"] > 0, "Trust should stay positive after 2 exchanges"
-        assert d["affection"] >= 0, "Affection should not go negative after 2 exchanges"
+        assert sum(d.values()) < 0, (
+            f"max clash should outweigh the contact baseline: {d}"
+        )
 
     def test_end_conversation_mutual_sentiment(
         self, memory, npc_pair,
@@ -423,10 +430,10 @@ class TestConversationSentiment:
 
             s_ab = memory.sentiment.get(alice.npc_id, bob.npc_id)
             s_ba = memory.sentiment.get(bob.npc_id, alice.npc_id)
-            # Both should have trust, affection, and respect
+            # Both directions gain the contact baseline (respect is
+            # NOT part of it — earned via the tone write path).
             assert s_ab.trust > 0 and s_ba.trust > 0
             assert s_ab.affection > 0 and s_ba.affection > 0
-            assert s_ab.respect > 0 and s_ba.respect > 0
             # Mutual — should be symmetric
             assert s_ab.trust == s_ba.trust
         asyncio.new_event_loop().run_until_complete(_run())

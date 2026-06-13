@@ -36,6 +36,30 @@ THRESHOLDS = {
     "strong_positive": 50,
 }
 
+# ---- Content-aware sentiment tables (emergent write-paths arc) ----
+# Data-driven by design: the AI Game Studio can retune these without
+# touching logic. Both are applied ONE-DIRECTIONALLY (the judging
+# NPC's sentiment toward the other) — asymmetric relationships are
+# the point: Jasper can resent Voss while Voss merely pities Jasper.
+
+# How a conversation FELT, judged by the NPC's own post-conversation
+# reflection (persona-conditioned LLM verdict). These must be able to
+# outweigh the mere-contact baseline in converse.py, or friction the
+# LLM generates can never register.
+CONVERSATION_TONE_DELTAS: dict[str, dict[str, float]] = {
+    "warm": {"trust": 2.0, "affection": 2.0},
+    "neutral": {},
+    "tense": {"trust": -2.0, "affection": -1.5},
+    "hostile": {"trust": -5.0, "affection": -4.0, "respect": -1.0},
+}
+
+# A direct accusation between conversation participants. The accused
+# resents being accused; the accuser, by accusing, reveals distrust.
+ACCUSATION_SENTIMENT_DELTAS: dict[str, dict[str, float]] = {
+    "accused_toward_accuser": {"trust": -3.0, "affection": -1.0},
+    "accuser_toward_accused": {"trust": -2.0, "respect": -1.0},
+}
+
 
 @dataclass
 class Sentiment:

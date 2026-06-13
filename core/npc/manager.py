@@ -58,7 +58,9 @@ from core.memory.reflection import (
     IdentityClaim,
 )
 from core.memory.self_review import apply_identity_reinforcement
-from core.relationships.sentiment import SentimentTracker
+from core.relationships.sentiment import (
+    SentimentTracker, ACCUSATION_SENTIMENT_DELTAS,
+)
 from core.relationships.structures import FactionManager
 from core.events.impact import EventImpactSystem, GameEvent
 from core.world.spatial_awareness import resolve_overlaps
@@ -141,6 +143,11 @@ class NPCManager:
             sentiment=self.sentiment,
             factions=self.factions,
         )
+        # Externally-supplied MemoryManagers (tests, evals) often omit
+        # the tracker; without this the tone→sentiment write path
+        # no-ops silently in exactly the environments that audit it.
+        if self.memory.sentiment is None:
+            self.memory.sentiment = self.sentiment
         self.memory.initialise()
 
         # Wire sentiment into conversation module
@@ -1375,6 +1382,14 @@ class NPCManager:
                         location_x=int(npc_a.x),
                         location_z=int(npc_a.z),
                     )
+                    self._apply_accusation_sentiment(
+                        outcome,
+                        participants={
+                            npc_a.npc_id: npc_a.name,
+                            npc_b.npc_id: npc_b.name,
+                        },
+                        current_minutes=current_minutes,
+                    )
                     logger.info(
                         "OUTCOMES %s↔%s: +%d commitments, +%d accusations, "
                         "+%d relayed (conv=%s)",
@@ -1441,7 +1456,7 @@ class NPCManager:
 
             # Concurrent reflection pass, bounded at 15s per NPC.
             async def _reflect_one(
-                npc_: NPC, other_name_: str,
+                npc_: NPC, other_name_: str, other_id_: str = "",
             ) -> None:
                 rd = self.router.route(
                     npc_, "reflection",
@@ -1455,6 +1470,15 @@ class NPCManager:
                             npc_, other_name_, exchanges,
                             self.memory, self.llm, current_minutes,
                             outcome=outcome,
+                            other_id=other_id_,
+                            # Reflection-born identity goes through the
+                            # same contradiction-damped applier as
+                            # conversation claims (write-paths arc).
+                            claim_sink=lambda claim, _n=npc_: (
+                                self._inject_self_concept_delta(
+                                    _n, claim, current_minutes,
+                                )
+                            ),
                         ),
                         timeout=15.0,
                     )
@@ -1551,8 +1575,8 @@ class NPCManager:
                     )
 
             await asyncio.gather(
-                _reflect_one(npc_a, npc_b.name),
-                _reflect_one(npc_b, npc_a.name),
+                _reflect_one(npc_a, npc_b.name, npc_b.npc_id),
+                _reflect_one(npc_b, npc_a.name, npc_a.npc_id),
                 return_exceptions=True,
             )
 
@@ -1632,6 +1656,57 @@ class NPCManager:
         "betrayed": ("helped", "saved"),
         "saved": ("betrayed",),
     }
+
+    def _apply_accusation_sentiment(
+        self,
+        outcome: Any,
+        participants: dict[str, str],
+        current_minutes: float,
+    ) -> int:
+        """Apply sentiment penalties for direct accusations.
+
+        Emergent-write-paths arc: accusations were already extracted
+        and stored but never touched the relationship table — an NPC
+        could be accused of theft and walk away trusting the accuser
+        MORE (via the contact baseline). Applies only when accuser
+        and accused are both conversation participants; third-party
+        (relayed) accusations stay memory-only for now. Deltas are
+        one-directional per ACCUSATION_SENTIMENT_DELTAS. Returns the
+        number of accusations applied.
+        """
+        accusations = getattr(outcome, "accusations", None) or []
+        if not accusations:
+            return 0
+        name_to_id = {
+            name.strip().lower(): npc_id
+            for npc_id, name in participants.items()
+        }
+        applied = 0
+        for acc in accusations:
+            accuser_id = name_to_id.get((acc.accuser or "").strip().lower())
+            accused_id = name_to_id.get((acc.accused or "").strip().lower())
+            if not accuser_id or not accused_id or accuser_id == accused_id:
+                continue
+            for dim, delta in ACCUSATION_SENTIMENT_DELTAS[
+                "accused_toward_accuser"
+            ].items():
+                self.sentiment.modify(
+                    accused_id, accuser_id, dim, delta,
+                    game_time=current_minutes,
+                )
+            for dim, delta in ACCUSATION_SENTIMENT_DELTAS[
+                "accuser_toward_accused"
+            ].items():
+                self.sentiment.modify(
+                    accuser_id, accused_id, dim, delta,
+                    game_time=current_minutes,
+                )
+            applied += 1
+            logger.info(
+                "ACCUSATION_SENTIMENT %s accused %s: '%s'",
+                acc.accuser, acc.accused, acc.claim[:60],
+            )
+        return applied
 
     def _inject_self_concept_delta(
         self, npc: NPC, claim: IdentityClaim,
