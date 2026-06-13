@@ -282,3 +282,42 @@ asymmetric decay for the 30-day horizon.
 source 2 (uniform warmth broken, genuine dislike not yet). 30-day run
 still gated — pending the Arc-A tuning producing true negative
 sentiment. Source 3 (volume drowning, 5%) untouched by design.
+
+## Arc-A tuning pass (2026-06-13, branch `arc-a-negative-sentiment`)
+
+The diagnosis was that friction couldn't accumulate: positives apply
+every conversation and swamp the rare bounded negatives, and
+mere-contact bonding paints over any grudge. Three evidence-driven
+levers, all grounded in **negativity bias** (bad interactions weigh
+more, and stick longer, than good ones):
+- **Larger hostile/tense magnitudes + fear.** Hostile is now trust
+  −8 / affection −7 / respect −3 / fear +3 (was −5/−4/−1); tense
+  −4/−3/−1. A clash must be outweighed by several warm conversations
+  to recover. Hostile raising `fear` lowers `overall_disposition` and
+  marks the encounter wary in *kind*, not just colder in degree.
+- **Grudges resist mere-contact bonding** (`_apply_contact_baseline`,
+  per-direction). A positive baseline delta is suppressed for any
+  dimension the NPC currently holds negative — only a genuinely
+  warm-*toned* conversation can heal a soured dimension; proximity
+  cannot. This is the lever that lets rare negatives persist instead
+  of being painted over. Clash (negative) baselines still always
+  apply. *Overcorrection guard:* the gate only suppresses positive
+  rebuilding on already-negative dims — it never creates negativity,
+  so the cordial majority is untouched (unit-pinned).
+- **Asymmetric decay:** negatives decay at half rate (grudges linger).
+  Negligible over 6 days, correct for the 30-day horizon.
+- Accusation magnitudes bumped to survive cordial contact.
+
+**Instrumentation:** a process-wide tone tally now folds into the
+diagnostic dump meta (`tone_tally`), so the run reports verdict
+frequency — whether negatives are rare-but-now-sticky (the intended
+mechanism) or simply infrequent.
+
+Evals: 7 new Arc-A tests in `tests/unit/test_write_paths.py`. Suite
+1399 green; foundation/persona/movement gates pass.
+
+**Measurement in flight:** 6-day Mistral, baseline config →
+`runs/arc_a_tuned.json`. Success = negative-sentiment % above 0
+(genuine dislike, concentrated on antagonistic pairs like the
+objector) WITHOUT flipping the cordial majority negative; voice ≤0.07
+and self-keys ≥9 stand guard against regression.
