@@ -110,6 +110,24 @@ ACTION_INTENT_PROMPT = (
 
 VALID_TONES = ("warm", "neutral", "tense", "hostile")
 
+# Mechanism instrumentation (Arc-A): a process-wide tally of the tone
+# verdicts NPCs actually reach, so a measurement run reports WHY
+# sentiment moved (verdict frequency), not just the outcome. The
+# diagnostic folds this into its dump meta. Module-global to match the
+# codebase's other run-scoped singletons (_response_cache,
+# _active_conversations); reset between runs via reset_tone_tally().
+from collections import Counter as _Counter
+
+TONE_TALLY: "_Counter[str]" = _Counter()
+
+
+def reset_tone_tally() -> None:
+    TONE_TALLY.clear()
+
+
+def get_tone_tally() -> dict[str, int]:
+    return dict(TONE_TALLY)
+
 # Self-concept prefixes a reflection may assert about ONESELF. Matches
 # the phrase_map in NPC.self_concept_summary; `helped`/`built`/`joined`
 # are excluded — those are earned through I.4 goal completion, not
@@ -468,6 +486,9 @@ async def reflect_on_conversation(
         )
 
         insight, tone, self_claim = parse_reflection_extras(insight.strip())
+
+        if tone:
+            TONE_TALLY[tone] += 1
 
         if tone and other_id:
             sentiment = getattr(memory, "sentiment", None)

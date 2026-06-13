@@ -30,6 +30,7 @@ from core.memory.structured import StructuredMemory
 from core.npc.models import NPC, PersonalityTraits
 from core.npc.persona import PersonaForge
 from core.relationships.sentiment import (
+    ACCUSATION_SENTIMENT_DELTAS,
     CONVERSATION_TONE_DELTAS,
     SentimentTracker,
 )
@@ -400,3 +401,112 @@ class TestEndToEndWiring:
         # the manager's contradiction-damped applier.
         assert a.self_concept.get("rival_of:bran", 0) > 0
         assert b.self_concept.get("rival_of:bran", 0) > 0
+
+
+# ---------- Arc-A tuning: friction must persist into genuine dislike ----------
+
+class TestArcATuning:
+    """The Arc-A measurement showed friction registering only as
+    withheld warmth — 0/90 relationships held a single negative
+    dimension, because frequent positives swamped rare bounded
+    negatives and mere-contact bonding painted over grudges. These
+    pin the tuning: negativity-biased magnitudes, contact baseline
+    that cannot rebuild a soured dimension, and grudges that resist
+    decay — without flipping the cordial majority negative.
+    """
+
+    def test_negativity_bias_magnitudes(self):
+        warm = CONVERSATION_TONE_DELTAS["warm"]
+        tense = CONVERSATION_TONE_DELTAS["tense"]
+        hostile = CONVERSATION_TONE_DELTAS["hostile"]
+        # A bad interaction outweighs a good one (negativity bias).
+        assert abs(hostile["trust"]) > warm["trust"]
+        assert abs(tense["trust"]) > warm["trust"]
+        # Hostile is distinct from tense in kind, not only degree.
+        assert hostile.get("fear", 0) > 0
+        assert abs(hostile["trust"]) > abs(tense["trust"])
+        # Accusations are sized to survive subsequent cordial contact.
+        assert ACCUSATION_SENTIMENT_DELTAS["accused_toward_accuser"]["trust"] <= -5.0
+
+    def test_contact_baseline_does_not_rebuild_a_grudge(self):
+        from core.npc.cognition.converse import _apply_contact_baseline
+
+        st = SentimentTracker(db_path=":memory:")
+        st.initialise()
+        # A already distrusts B; B feels nothing yet.
+        st.modify("a", "b", "trust", -10.0)
+        _apply_contact_baseline(
+            st, "a", "b",
+            {"trust": 2.0, "affection": 1.0}, game_time=1.0,
+        )
+        # A's grudge-trust is NOT rebuilt by mere contact...
+        assert st.get("a", "b").trust == -10.0
+        # ...but a non-soured dimension (affection) still bonds...
+        assert st.get("a", "b").affection == 1.0
+        # ...and B, holding no grudge, bonds normally both dims.
+        assert st.get("b", "a").trust == 2.0
+        assert st.get("b", "a").affection == 1.0
+
+    def test_contact_baseline_negative_delta_always_applies(self):
+        from core.npc.cognition.converse import _apply_contact_baseline
+
+        st = SentimentTracker(db_path=":memory:")
+        st.initialise()
+        st.modify("a", "b", "respect", -3.0)
+        # A clash penalty (negative delta) deepens even a soured dim.
+        _apply_contact_baseline(
+            st, "a", "b", {"respect": -1.0}, game_time=1.0,
+        )
+        assert st.get("a", "b").respect == -4.0
+
+    def test_fresh_pair_bonds_normally_both_directions(self):
+        from core.npc.cognition.converse import _apply_contact_baseline
+
+        st = SentimentTracker(db_path=":memory:")
+        st.initialise()
+        _apply_contact_baseline(
+            st, "a", "b", {"trust": 2.0, "affection": 1.0}, game_time=1.0,
+        )
+        # Overcorrection guard: the cordial majority is untouched by
+        # the grudge gate — both directions still gain.
+        for a, b in (("a", "b"), ("b", "a")):
+            assert st.get(a, b).trust == 2.0
+            assert st.get(a, b).affection == 1.0
+
+    async def test_warm_tone_can_still_rebuild_a_grudge(self):
+        # Mere contact can't rebuild a grudge, but a genuinely
+        # warm-TONED conversation (the reflection path, ungated) can —
+        # relationships recover through real warmth, not proximity.
+        npc = _make_npc()
+        memory = _make_memory()
+        memory.sentiment.modify(npc.npc_id, "bran_1", "trust", -6.0)
+        await reflect_on_conversation(
+            npc, "Bran",
+            [{"speaker": "Bran", "message": "I owe you an apology."}],
+            memory, _StubLLM("We made our peace.\nTONE: warm"),
+            current_game_time=5.0, other_id="bran_1",
+        )
+        assert memory.sentiment.get(npc.npc_id, "bran_1").trust > -6.0
+
+    def test_grudges_decay_slower_than_goodwill(self):
+        st = SentimentTracker(db_path=":memory:")
+        st.initialise()
+        st.modify("a", "b", "trust", 20.0)     # goodwill
+        st.modify("a", "c", "trust", -20.0)    # grudge
+        st.decay_all(elapsed_game_minutes=1440.0)
+        goodwill = st.get("a", "b").trust
+        grudge = abs(st.get("a", "c").trust)
+        # Both shrank toward zero, but the grudge retained more.
+        assert goodwill < 20.0 and grudge < 20.0
+        assert grudge > goodwill
+
+    def test_tone_tally_counts_and_resets(self):
+        from core.memory import reflection as refl
+
+        refl.reset_tone_tally()
+        assert refl.get_tone_tally() == {}
+        refl.TONE_TALLY["hostile"] += 1
+        refl.TONE_TALLY["warm"] += 2
+        assert refl.get_tone_tally() == {"hostile": 1, "warm": 2}
+        refl.reset_tone_tally()
+        assert refl.get_tone_tally() == {}
