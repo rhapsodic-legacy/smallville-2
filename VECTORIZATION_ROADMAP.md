@@ -316,8 +316,52 @@ mechanism) or simply infrequent.
 Evals: 7 new Arc-A tests in `tests/unit/test_write_paths.py`. Suite
 1399 green; foundation/persona/movement gates pass.
 
-**Measurement in flight:** 6-day Mistral, baseline config →
-`runs/arc_a_tuned.json`. Success = negative-sentiment % above 0
-(genuine dislike, concentrated on antagonistic pairs like the
-objector) WITHOUT flipping the cordial majority negative; voice ≤0.07
-and self-keys ≥9 stand guard against regression.
+**Measurement (2026-06-13, 6-day Mistral, baseline config →
+`runs/arc_a_tuned.json`):** SUCCESS.
+
+| metric | persona | write-paths | arc-a-tuned |
+|---|---|---|---|
+| sentiment mean | +41.5 | +14.5 | **+3.8** |
+| min disposition | +6.2 | −1.7 | **−24.6** |
+| **negative (<−5)** | 0% | 0% | **24%** |
+| neutral / positive | 0 / 100% | 27 / 73% | **41% / 34%** |
+| stdev | 21.1 | 12.6 | **14.5** |
+| self-concept keys / NPC | 1.0 | 9.5 | 8.1 (0 empty, overlap 0.02) |
+| voice similarity | 0.09 | 0.07 | **0.07** (guard held) |
+| homogenisation verdict | SYSTEMIC (4) | MULTI-FACTOR (2) | **MULTI-FACTOR (2)** |
+
+Genuine dislike formed, and it's **individuated, not uniform**: some
+NPCs well-liked (Voss +12.8, Calla +12.5), some genuinely disliked,
+most holding a mix. The town grew its *own* polarising figure (Mira,
+disliked by 6/9) independent of the seeded objector — emergent social
+structure, with textured relationships ("distrusts them, looks down
+on them, dislikes them"). Mean stays net-positive (+3.8): not "everyone
+hates everyone". Bridge-objector verdict: **EMERGENCE-RICH** again
+(C1 8 dissent lines, C3 −3.2 relative, C4 4 NPCs).
+
+**Mechanism (tone tally, the new instrument): 478 tense / 218 neutral
+/ 29 warm / 25 hostile.** The negatives are no longer rare — the LLM
+judges ~64% of conversations at-least-tense, and grudge-persistence
+lets those accumulate. The healthy *outcome* distribution (tense is
+only −4, and the well-liked still bond) absorbed that rate without
+collapsing.
+
+**WATCH-ITEM for the 30-day run.** That 64%-tense rate traces to the
+temperament bank being deliberately abrasive-heavy (contrarian,
+suspicious, blunt, grudge-holding — seeded that way to manufacture
+friction for the bridge-objector experiment). At 6 days it nets a
+healthy 34/41/24 split, but with grudge-persistence + half-rate
+negative decay, a 64%-tense town could drift majority-negative by
+day 30. Before committing the 30-day run, rebalance `TEMPERAMENTS`
+in `core/npc/persona.py` toward more warmth (a general living world
+isn't 64% abrasive), or read day-by-day sentiment drift and stop if
+it sours. This is a persona-bank calibration, not an Arc-A defect —
+the write-path mechanics are sound.
+
+**Gate status — all four homogenisation sources now resolved or
+attributed:** source 1 (self-formation) RESOLVED by Arc B; source 2
+(uniform sentiment) RESOLVED by Arc-A tuning; sources 3+4 (volume
+drowning, churn) untouched **by design** — the conversation-volume
+policy (Arc C) is a separate decision, not a homogenisation bug. The
+30-day emergence-run gate is **reopened**, conditional on the
+temperament-bank rebalance above.
