@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -182,12 +183,100 @@ def _build_provider(provider: str):
             print(f"ERROR: could not init MistralProvider: {exc}")
             sys.exit(1)
         return llm, f"Mistral ({MistralProvider.NPC_MODEL})"
-    print(f"ERROR: unknown provider {provider!r} (use 'mistral' or 'gemma').")
+    if provider == "mock":
+        # Deterministic harness de-risking: exercises the full run loop,
+        # day-rollover snapshots, sidecar, and table in seconds. Tone is
+        # deterministic (no real verdicts), so sentiment trajectory is
+        # flat — use it to verify plumbing, not behaviour.
+        from core.npc.llm_client import MockProvider
+        return MockProvider(), "Mock (deterministic, plumbing-only)"
+    print(f"ERROR: unknown provider {provider!r} (use 'mistral'/'gemma'/'mock').")
     sys.exit(1)
 
 
+def _snapshot_metrics(mgr, npcs, day, prev_tone, events_today):
+    """Lightweight daily metrics over LIVE state (no dump).
+
+    The trajectory instrument: called once per snapshot day so a long
+    run yields a time series — letting us see whether sentiment
+    converges smoothly, oscillates, or drifts, and correlate inflections
+    with events (bridge cycles) and, via the final full dump, with what
+    NPCs were actually saying. Cheap enough to run daily (a few hundred
+    directed pairs); voice is NOT computed here (it needs the whole
+    dialogue corpus) — that stays a one-shot at end-of-run.
+    """
+    import statistics as _st
+    from core.memory.reflection import get_tone_tally
+    from collections import defaultdict
+
+    disp: list[float] = []
+    incoming: dict[str, list[float]] = defaultdict(list)
+    for n in npcs:
+        for s in mgr.sentiment.get_all_for(n.npc_id):
+            d = s.overall_disposition()
+            disp.append(d)
+            tgt = mgr.get_npc(s.npc_to)
+            incoming[tgt.name if tgt else s.npc_to].append(d)
+
+    total = len(disp) or 1
+    neg = sum(1 for v in disp if v < -5)
+    neu = sum(1 for v in disp if -5 <= v <= 5)
+    pos = sum(1 for v in disp if v > 5)
+    self_keys = [len(x.self_concept) for x in npcs]
+
+    tone_cum = get_tone_tally()
+    tone_day = {k: tone_cum.get(k, 0) - prev_tone.get(k, 0)
+                for k in ("tense", "neutral", "warm", "hostile")}
+
+    # Most-disliked NPC this snapshot (emergent-pariah tracking).
+    pariah, pariah_mean = None, 0.0
+    if incoming:
+        pariah, vals = min(incoming.items(), key=lambda kv: _st.mean(kv[1]))
+        pariah_mean = _st.mean(vals)
+
+    snap = {
+        "day": day,
+        "rels": len(disp),
+        "neg_pct": round(neg / total, 3),
+        "neu_pct": round(neu / total, 3),
+        "pos_pct": round(pos / total, 3),
+        "mean": round(_st.mean(disp), 2) if disp else 0.0,
+        "stdev": round(_st.pstdev(disp), 2) if len(disp) > 1 else 0.0,
+        "min": round(min(disp), 1) if disp else 0.0,
+        "max": round(max(disp), 1) if disp else 0.0,
+        "self_keys_mean": round(_st.mean(self_keys), 2) if self_keys else 0.0,
+        "tone_today": tone_day,
+        "most_disliked": pariah,
+        "most_disliked_mean": round(pariah_mean, 1),
+        "events": list(events_today),
+    }
+    return snap, tone_cum
+
+
+def _print_trajectory_table(timeseries: list[dict]) -> None:
+    """One table = the whole run's social arc at a glance."""
+    if not timeseries:
+        return
+    print("\n" + "=" * 90)
+    print("SENTIMENT TRAJECTORY (per snapshot day)")
+    print("=" * 90)
+    print(f"{'day':>3} {'neg%':>5} {'neu%':>5} {'pos%':>5} {'mean':>6} "
+          f"{'min':>6} {'self':>5} {'tone t/n/w/h':>14}  events")
+    for s in timeseries:
+        t = s["tone_today"]
+        tone_str = f"{t['tense']}/{t['neutral']}/{t['warm']}/{t['hostile']}"
+        ev = ",".join(s["events"]) if s["events"] else ""
+        print(f"{s['day']:>3} "
+              f"{s['neg_pct']*100:>4.0f}% {s['neu_pct']*100:>4.0f}% "
+              f"{s['pos_pct']*100:>4.0f}% {s['mean']:>+6.1f} {s['min']:>6.1f} "
+              f"{s['self_keys_mean']:>5.1f} {tone_str:>14}  {ev}")
+    print("=" * 90)
+
+
 async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
-              dump_path: str | None = None) -> None:
+              dump_path: str | None = None,
+              snapshot_every: int = 1,
+              timeseries_path: str | None = None) -> None:
     llm, llm_label = _build_provider(provider)
 
     print("=" * 90)
@@ -246,6 +335,14 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     current_goal = None        # held reference — survives _goals overwrite
     seen_bridge_mem_ids: set = set()
 
+    # --- Trajectory instrumentation (daily snapshots) ---
+    from core.memory.reflection import reset_tone_tally
+    reset_tone_tally()  # run-scoped tone tally
+    timeseries: list[dict] = []
+    _tone_cumulative: dict[str, int] = {}
+    if timeseries_path is None and dump_path is not None:
+        timeseries_path = dump_path.replace(".json", "") + "_timeseries.json"
+
     def _log(line: str) -> None:
         """Append AND stream immediately — so a watcher sees events as they
         happen rather than waiting for end-of-run accumulation."""
@@ -301,6 +398,7 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
         if clock.day != last_reported_day:
             last_reported_day = clock.day
             day = clock.day
+            events_today: list[str] = []
 
             # Finalise the previous cycle once it has resolved. We read it from
             # the held reference because propose() overwrites _goals by id.
@@ -314,6 +412,7 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
                     "progress": current_goal.progress,
                     "required": current_goal.required_contributions,
                 })
+                events_today.append(f"bridge_{current_goal.status.value}")
                 current_goal = None
 
             # Propose bridge goal if none active and cooldown allows.
@@ -326,6 +425,7 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
                 if goal and mgr.town_agenda.propose(goal, day):
                     bridge_cycles += 1
                     current_goal = goal
+                    events_today.append(f"bridge_proposed#{bridge_cycles}")
                     _log(
                         f"[day {day:3d}] PROPOSED repair_bridge "
                         f"(cycle #{bridge_cycles}, deadline day {goal.deadline_day})"
@@ -366,6 +466,32 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
                     f"[day {day:3d}] OBJECTOR_MEM [{m.category}] {desc!r}"
                 )
 
+            # Daily trajectory snapshot (lightweight metrics over live
+            # state) — written incrementally so a run stopped early
+            # still leaves a complete time series to here.
+            if day > 0 and (day % snapshot_every == 0):
+                snap, _tone_cumulative = _snapshot_metrics(
+                    mgr, npcs, day, _tone_cumulative, events_today,
+                )
+                timeseries.append(snap)
+                _log(
+                    f"[day {day:3d}] SNAPSHOT neg={snap['neg_pct']:.0%} "
+                    f"neu={snap['neu_pct']:.0%} pos={snap['pos_pct']:.0%} "
+                    f"mean={snap['mean']:+.1f} self={snap['self_keys_mean']:.1f} "
+                    f"tone(t/n/w/h)={snap['tone_today']['tense']}/"
+                    f"{snap['tone_today']['neutral']}/{snap['tone_today']['warm']}/"
+                    f"{snap['tone_today']['hostile']} "
+                    f"pariah={snap['most_disliked']}({snap['most_disliked_mean']:+.0f})"
+                )
+                if timeseries_path:
+                    try:
+                        with open(timeseries_path, "w") as _f:
+                            json.dump({"seed": SEED, "pop": POPULATION,
+                                       "days": days, "series": timeseries}, _f,
+                                      indent=2)
+                    except Exception as _e:
+                        print(f"[ts] write failed: {_e}", flush=True)
+
         # Progress print every N sim days.
         if tick > 0 and tick % (TICKS_PER_DAY * PROGRESS_REPORT_DAYS) == 0:
             elapsed = time.time() - start
@@ -375,6 +501,9 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
             )
 
     elapsed = time.time() - start
+
+    # --- Trajectory table (the whole social arc at a glance) ---
+    _print_trajectory_table(timeseries)
 
     # --- Final report ---
     print("\n" + "=" * 90)
@@ -539,6 +668,9 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
             # conversations tense/hostile vs warm/neutral. Lets us read
             # WHY sentiment moved, not just that it did.
             "tone_tally": get_tone_tally(),
+            # Full per-day trajectory (also written incrementally to the
+            # _timeseries.json sidecar during the run).
+            "timeseries": timeseries,
         }
         written = dump_run_state(mgr, npcs, meta, dump_path)
         print(f"[dump] wrote run memories/state -> {written}", flush=True)
@@ -551,16 +683,29 @@ if __name__ == "__main__":
         help=f"Simulated days (default {DEFAULT_DAYS}).",
     )
     parser.add_argument(
-        "--provider", choices=("mistral", "gemma"), default="mistral",
+        "--provider", choices=("mistral", "gemma", "mock"), default="mistral",
         help="Cognition engine. 'mistral' (default) = fast API path for "
              "harness de-risking; 'gemma' = production engine, slow, for the "
-             "confirmatory run.",
+             "confirmatory run; 'mock' = deterministic plumbing smoke.",
     )
     parser.add_argument(
         "--dump", default=None, metavar="PATH",
         help="Write the run's NPC memories + state to PATH (JSON) at the end, "
              "for review/synopsis via run_memory.py.",
     )
+    parser.add_argument(
+        "--snapshot-every", type=int, default=1, metavar="N",
+        help="Take a lightweight metrics snapshot every N sim-days "
+             "(default 1 = daily). Builds the sentiment trajectory time "
+             "series + end-of-run table.",
+    )
+    parser.add_argument(
+        "--timeseries", default=None, metavar="PATH",
+        help="Write the per-day trajectory to PATH (JSON), incrementally. "
+             "Defaults to <dump>_timeseries.json when --dump is given.",
+    )
     args = parser.parse_args()
     asyncio.run(run(days=args.days, provider=args.provider,
-                    dump_path=args.dump))
+                    dump_path=args.dump,
+                    snapshot_every=args.snapshot_every,
+                    timeseries_path=args.timeseries))

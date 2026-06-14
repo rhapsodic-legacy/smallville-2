@@ -127,6 +127,43 @@ TEMPERAMENTS: list[str] = [
     "even one that is none of their business.",
     "Ambitious and a little ruthless; privately ranks everyone they "
     "meet by usefulness.",
+    # --- Warm / prosocial half ---
+    # The bank's warm:abrasive ratio is a deliberate world-tone knob.
+    # The forge deals temperaments without replacement, so a town's
+    # composition tracks this ratio: at ~50/50 a population of 10 draws
+    # roughly 3-4 prickly characters among 6-7 warm ones — friction
+    # exists and concentrates on a few, without the whole town reading
+    # acrimonious. (An earlier abrasive-heavy bank, seeded that way for
+    # the bridge-objector experiment, drove ~64% of conversations
+    # tense; see VECTORIZATION_ROADMAP.md, Arc-A tuning.)
+    "Warm-hearted and openly fond of people; greets near-strangers "
+    "like old friends and means it.",
+    "Steady and even-tempered — the one others seek out when they need "
+    "someone calm to think beside.",
+    "Loyal to the bone; once you are their friend you can do little "
+    "that they will not forgive.",
+    "Generous without strings — gives freely, then genuinely forgets "
+    "the debt was ever owed.",
+    "Forgiving by nature; lets slights slide off and cannot hold a "
+    "grudge however hard they try.",
+    "Quietly attentive — notices who is struggling and helps before "
+    "being asked, without making a show of it.",
+    "Sunny and encouraging; finds the bright side of any trouble and "
+    "presses it warmly on whoever is glum.",
+    "Curious and delighted by people; asks real questions and "
+    "remembers the answers a year later.",
+    "Gentle and patient, especially with the young, the old, and the "
+    "slow — never rushes anyone.",
+    "Merry and sociable; the easy heart of any gathering, happiest "
+    "with a full table.",
+    "Earnest and trusting; takes people at their word and is slow to "
+    "think ill of anyone.",
+    "Tender-hearted — moved easily by others' troubles and quick to "
+    "offer comfort.",
+    "Good-humoured; turns aside a sharp word with a joke rather than "
+    "letting it catch.",
+    "Companionable and unhurried; treats every conversation as worth "
+    "having for its own sake.",
 ]
 
 BEHAVIOUR_RULES: list[str] = [
