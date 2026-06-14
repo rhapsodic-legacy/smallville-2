@@ -561,6 +561,29 @@ def _conversation_sentiment_deltas(
     return {k: v for k, v in deltas.items() if abs(v) > 1e-9}
 
 
+def _apply_contact_baseline(
+    sentiment, from_id: str, other_id: str,
+    deltas: dict[str, float], game_time: float,
+) -> None:
+    """Apply the mere-contact sentiment baseline, per direction.
+
+    The asymmetry that lets friction persist (Arc-A tuning): a POSITIVE
+    baseline delta is suppressed for any dimension the NPC currently
+    holds NEGATIVE toward the other. Goodwill-by-proximity must not
+    quietly paint over a grudge — only a genuinely warm-TONED
+    conversation (reflection.py's tone verdict) can rebuild a soured
+    dimension. Negative baseline deltas (a personality clash) always
+    apply, in both directions. Checked per direction because sentiment
+    is directional — A may resent B while B feels nothing.
+    """
+    for a, b in ((from_id, other_id), (other_id, from_id)):
+        current = sentiment.get(a, b)
+        for dim, delta in deltas.items():
+            if delta > 0 and current.get(dim) < -0.01:
+                continue  # don't rebuild a soured dimension by proximity
+            sentiment.modify(a, b, dim, delta, game_time=game_time)
+
+
 async def end_conversation(
     npc: NPC,
     other: NPC,
@@ -601,11 +624,10 @@ async def end_conversation(
                 deltas = _conversation_sentiment_deltas(
                     npc, other, exchange_count,
                 )
-                for dim, delta in deltas.items():
-                    memory_manager.sentiment.modify_mutual(
-                        npc.npc_id, other.npc_id, dim, delta,
-                        game_time=current_game_minutes,
-                    )
+                _apply_contact_baseline(
+                    memory_manager.sentiment, npc.npc_id, other.npc_id,
+                    deltas, current_game_minutes,
+                )
 
     npc.conversation_partner = None
     other.conversation_partner = None

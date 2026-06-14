@@ -43,21 +43,33 @@ THRESHOLDS = {
 # the point: Jasper can resent Voss while Voss merely pities Jasper.
 
 # How a conversation FELT, judged by the NPC's own post-conversation
-# reflection (persona-conditioned LLM verdict). These must be able to
-# outweigh the mere-contact baseline in converse.py, or friction the
-# LLM generates can never register.
+# reflection (persona-conditioned LLM verdict). Applied one-directionally.
+#
+# Negatives are deliberately LARGER than the warm positive (negativity
+# bias — a well-established asymmetry; one bad exchange weighs more than
+# one good one). The Arc-A measurement showed why this matters: with
+# small symmetric deltas, the frequent positives (warm tone + the
+# per-conversation contact baseline) swamped the rare tense/hostile hits
+# and NO relationship ever held a single negative dimension. A genuine
+# clash now has to be outweighed by SEVERAL warm conversations to
+# recover, so friction on antagonistic pairs (e.g. the objector and the
+# bridge-supporters) actually accumulates into dislike. Hostile also
+# raises `fear`, which lowers `overall_disposition` and marks the
+# encounter as wary in kind, not just colder in degree.
 CONVERSATION_TONE_DELTAS: dict[str, dict[str, float]] = {
     "warm": {"trust": 2.0, "affection": 2.0},
     "neutral": {},
-    "tense": {"trust": -2.0, "affection": -1.5},
-    "hostile": {"trust": -5.0, "affection": -4.0, "respect": -1.0},
+    "tense": {"trust": -4.0, "affection": -3.0, "respect": -1.0},
+    "hostile": {"trust": -8.0, "affection": -7.0, "respect": -3.0,
+                "fear": 3.0},
 }
 
 # A direct accusation between conversation participants. The accused
 # resents being accused; the accuser, by accusing, reveals distrust.
+# Sized (like tone) to survive subsequent cordial contact.
 ACCUSATION_SENTIMENT_DELTAS: dict[str, dict[str, float]] = {
-    "accused_toward_accuser": {"trust": -3.0, "affection": -1.0},
-    "accuser_toward_accused": {"trust": -2.0, "respect": -1.0},
+    "accused_toward_accuser": {"trust": -5.0, "affection": -3.0},
+    "accuser_toward_accused": {"trust": -3.0, "respect": -2.0},
 }
 
 
@@ -302,6 +314,7 @@ class SentimentTracker:
         self,
         elapsed_game_minutes: float,
         rate_per_day: float = 0.02,
+        negative_rate_factor: float = 0.5,
     ) -> int:
         """Drift all non-zero sentiment dimensions toward zero.
 
@@ -311,6 +324,13 @@ class SentimentTracker:
         At 2 % per day a value of 50 takes ~35 days to halve — slow enough
         that active relationships easily outpace decay, but neglected ones
         fade over a few in-game weeks.
+
+        Negative values decay at ``rate_per_day * negative_rate_factor``
+        (half by default): grudges linger longer than goodwill fades.
+        This is negligible over a 6-day run but matters across the
+        30-day horizon, where a resentment that healed as fast as it
+        formed would never read as a durable rift. Negativity bias
+        again — bad feeling is stickier than good.
 
         Returns the number of relationships updated.
         """
@@ -325,12 +345,11 @@ class SentimentTracker:
                 val = s.get(dim)
                 if abs(val) < 0.01:
                     continue
-                # Shrink toward zero
-                reduction = abs(val) * rate_per_day
+                # Shrink toward zero; grudges (negative) resist decay.
                 if val > 0:
-                    s.set(dim, val - reduction)
+                    s.set(dim, val - val * rate_per_day)
                 else:
-                    s.set(dim, val + reduction)
+                    s.set(dim, val + abs(val) * rate_per_day * negative_rate_factor)
                 changed = True
             if changed:
                 self.set(s, s.updated_at)

@@ -528,12 +528,17 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     if dump_path:
         sys.path.insert(0, str(Path(__file__).parent))
         from run_memory import dump_run_state
+        from core.memory.reflection import get_tone_tally
         meta = {
             "event": "repair_bridge", "provider": provider, "days": days,
             "seed": SEED, "population": POPULATION,
             "objector_id": objector.npc_id, "objector_name": objector.name,
             "elapsed_s": round(elapsed),
             "cycles": cycles,
+            # Arc-A mechanism evidence: how often NPCs actually judged
+            # conversations tense/hostile vs warm/neutral. Lets us read
+            # WHY sentiment moved, not just that it did.
+            "tone_tally": get_tone_tally(),
         }
         written = dump_run_state(mgr, npcs, meta, dump_path)
         print(f"[dump] wrote run memories/state -> {written}", flush=True)
