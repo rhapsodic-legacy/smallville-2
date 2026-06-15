@@ -365,3 +365,51 @@ drowning, churn) untouched **by design** — the conversation-volume
 policy (Arc C) is a separate decision, not a homogenisation bug. The
 30-day emergence-run gate is **reopened**, conditional on the
 temperament-bank rebalance above.
+
+## 30-day "living world" run (2026-06-14/15, runs/full30_living_world.json)
+
+First full 30-day run, on the rebalanced temperament bank, with daily
+trajectory snapshots. **Two things to record: a strong valid result,
+and a real scale bug that limits part of the analysis.**
+
+**VALID result — the sentiment trajectory (the question the run asked).**
+Computed from the SQLite sentiment table + self_concept (both intact),
+so unaffected by the memory bug below. The town **converged smoothly to
+a stable, individuated equilibrium** — not a roller-coaster, not uniform
+convergence, not collapse:
+- pos 24%→~77%, neg 0%→~17%, neutral 76%→~7% (the lukewarm middle drained
+  into both tails = individuation), mean +3.3→+18.1. Reached steady state
+  by ~day 10-13 and held it for the remaining ~17 days.
+- Individuality verdict **SYSTEMIC (4 sources) → LOCALISED (1)** — only
+  volume-drowning (6%, the deliberately-deferred Arc C) remains. Voice
+  0.05 (on the 7 readable NPCs), self-keys 20.7, near-dup churn down to
+  14% (compaction working).
+- Emergent society (from intact sentiment data): beloved figures (Voss
+  +27, Calla +25, Dara +22); a curmudgeon — **Xander** soured into
+  misanthropy (dislikes ~everyone, town cooled to +1.0); a genuine
+  two-sided **feud** Xander↔Dorian (mutual strong dislike WITH high
+  resonance — alike enough to clash); the principled objector **Jasper**
+  at +14 (his opposition cost him relative standing, C3 −5.9, but he is
+  NOT an outcast). Shared culture emerged: `built:bridge` / `role:bridge`
+  / `helped:festival` held by ≥half the town — a collective bridge-builder
+  identity formed from shared events. Bridges completed 4/4.
+
+**SCALE BUG — ChromaDB episodic retrieval (separate, pre-existing).**
+3/10 NPCs (Voss, Calla, Jasper) return **0 episodic memories** from
+`get_recent(..., include_compacted=True)` at 30-day scale, despite rich
+self_concepts and clear interaction (sentiment formed about them). NOT
+tombstoning (include_compacted=True) and NOT the temperament/instrument
+changes (memory layer untouched; **all three 6-day runs had 0 affected
+NPCs** — it only surfaces at scale). Impact: (a) false-negatived the
+harness C1 voiced-dissent judge → META-VERDICT printed INVALID, which is
+itself an artifact, not evidence about emergence; (b) voice computable on
+only 7/10; (c) blocks the per-NPC memory-correlation for the 3 affected.
+The objector's belief is intact (`opposes:repair_bridge=1.0`) and renders
+into his prompt ("You see yourself as: opposed to repair bridge; a town
+bridge watcher; ..."), so the dissent almost certainly happened and was
+lost to retrieval, not unspoken.
+
+**Next step (fix-the-instrument):** root-cause the ChromaDB at-scale
+retrieval failure before any further long run — the episodic layer can't
+be trusted at 30-day scale, and it blocks the memory-correlation analysis.
+The sentiment/self trajectory result stands on its own.
