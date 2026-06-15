@@ -394,22 +394,54 @@ convergence, not collapse:
   / `helped:festival` held by ≥half the town — a collective bridge-builder
   identity formed from shared events. Bridges completed 4/4.
 
-**SCALE BUG — ChromaDB episodic retrieval (separate, pre-existing).**
+**SCALE BUG — episodic `get_recent` returns empty for some NPCs at
+30-day scale (investigated 2026-06-15; root cause still OPEN).**
 3/10 NPCs (Voss, Calla, Jasper) return **0 episodic memories** from
-`get_recent(..., include_compacted=True)` at 30-day scale, despite rich
-self_concepts and clear interaction (sentiment formed about them). NOT
-tombstoning (include_compacted=True) and NOT the temperament/instrument
-changes (memory layer untouched; **all three 6-day runs had 0 affected
-NPCs** — it only surfaces at scale). Impact: (a) false-negatived the
-harness C1 voiced-dissent judge → META-VERDICT printed INVALID, which is
-itself an artifact, not evidence about emergence; (b) voice computable on
-only 7/10; (c) blocks the per-NPC memory-correlation for the 3 affected.
-The objector's belief is intact (`opposes:repair_bridge=1.0`) and renders
-into his prompt ("You see yourself as: opposed to repair bridge; a town
-bridge watcher; ..."), so the dissent almost certainly happened and was
-lost to retrieval, not unspoken.
+`get_recent(..., include_compacted=True)` at the end of the run. Signature:
+**sudden, all-or-nothing per-NPC zeroing at scale** — at 6 days those same
+3 were normal/high activity (Voss & Calla at the 5000 cap, Jasper 3710),
+at 30 days they are exactly 0 while the other 7 are exactly 5000.
 
-**Next step (fix-the-instrument):** root-cause the ChromaDB at-scale
-retrieval failure before any further long run — the episodic layer can't
-be trusted at 30-day scale, and it blocks the memory-correlation analysis.
-The sentiment/self trajectory result stands on its own.
+Investigation (what it is NOT):
+- NOT my changes — memory layer untouched; all three 6-day runs had 0
+  affected NPCs.
+- NOT tombstoning — dump passes `include_compacted=True`.
+- NOT storage/retrieval-at-scale — **reproduction with a 53k-doc
+  collection + 21k compaction-style metadata-update churn returned correct
+  per-NPC counts for all 10**, disproving the original "ChromaDB at-scale
+  retrieval failure" prognosis.
+- NOT `update_metadata` (preserves `npc_id`) nor `delete_by_metadata`
+  (targeted by unique `conversation_id`).
+- Run log is CLEAN — zero ChromaDB/embedding/memory errors. Because
+  `get_recent`'s ChromaDB path ends in `except Exception: return []`
+  (SILENT), a failed `.get()` is indistinguishable from a genuinely empty
+  result. **That silent swallow is the bug that hides the bug.**
+
+Open hypotheses (need instrumentation): (a) `collection.get(where={npc_id})`
+throws only with REAL ONNX embeddings + ~50k docs + long-lived in-memory
+client (untriggerable with synthetic embeddings); (b) memories became
+unreadable for another un-reproduced reason. Can't inspect post-mortem:
+diagnostic uses in-memory `chromadb.Client()`, so the collection died with
+the process.
+
+Extent / isolation:
+- Sentiment + self_concept are SQLite — UNAFFECTED; the 30-day trajectory
+  result stands on its own.
+- Cognition CORE retrieval (`retrieve_context` → `.query`, capped ≤100) is
+  a different ChromaDB API and is robust — planning worked for all NPCs.
+- `get_recent` (unbounded `.get(where=)`) also feeds reflection focal
+  points, conversation unresolved-matters, replan, self-review. IF the
+  failure was present in the late run, those 3 NPCs' reflection/replan
+  context was silently empty in the final stretch — degraded, not crashed.
+  Onset day unknown: the daily snapshot didn't track per-NPC memory counts.
+
+Impact: false-negatived C1 dissent (META-VERDICT INVALID is itself the
+artifact — Jasper's `opposes:repair_bridge=1.0` renders into his prompt);
+voice computable on 7/10; blocks per-NPC memory-correlation for the 3.
+
+**Next steps (for discussion):** (1) make the failure VISIBLE — log the
+swallowed exception in `get_recent` + a count; (2) add per-NPC memory count
+to the daily snapshot to pinpoint onset day; (3) switch the diagnostic to
+`PersistentClient` for post-mortem inspection; (4) re-run / instrumented
+repro to catch it red-handed. The episodic layer can't be trusted at
+30-day scale until understood. Trajectory result is independent and stands.
