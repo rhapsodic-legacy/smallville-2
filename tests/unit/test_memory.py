@@ -199,6 +199,43 @@ class TestEpisodicStore:
         assert len(recent) == 2
         assert recent[0].game_time == 300  # most recent first
 
+    def test_added_count_tracks_adds_per_npc(self, episodic):
+        # Ground-truth counter for the RETRIEVAL GAP detector — counts
+        # successful adds independent of retrieval.
+        assert episodic.added_count("npc_1") == 0
+        episodic.add_memory("npc_1", "a", game_time=1)
+        episodic.add_memory("npc_1", "b", game_time=2)
+        episodic.add_memory("npc_2", "c", game_time=3)
+        assert episodic.added_count("npc_1") == 2
+        assert episodic.added_count("npc_2") == 1
+        assert episodic.added_count("absent") == 0
+
+    def test_added_count_is_retrieval_independent(self, episodic):
+        # The whole point: even if retrieval were to drop an NPC, the
+        # add-count still reflects what was stored — so a divergence is
+        # detectable rather than silently invisible.
+        for i in range(5):
+            episodic.add_memory("npc_1", f"m{i}", game_time=i)
+        episodic._fallback_memories.clear()  # simulate retrieval losing them
+        assert episodic.get_recent("npc_1") == []
+        assert episodic.added_count("npc_1") == 5  # ground truth survives
+
+    def test_get_recent_real_store_no_false_gap(self, caplog):
+        # On a healthy REAL ChromaDB store, get_recent must retrieve what
+        # was added and must NOT emit a spurious RETRIEVAL GAP warning.
+        store = EpisodicStore()
+        store.initialise()
+        if store._fallback_mode:
+            import pytest
+            pytest.skip("ChromaDB unavailable")
+        for i in range(8):
+            store.add_memory("npc_x", f"obs {i}", game_time=float(i))
+        import logging
+        with caplog.at_level(logging.WARNING):
+            got = store.get_recent("npc_x", limit=100, include_compacted=True)
+        assert len(got) == 8
+        assert "RETRIEVAL GAP" not in caplog.text
+
     def test_retrieve_by_relevance(self, episodic):
         episodic.add_memory("npc_1", "Alice the blacksmith is working", game_time=100)
         episodic.add_memory("npc_1", "Bob the farmer is sleeping", game_time=200)

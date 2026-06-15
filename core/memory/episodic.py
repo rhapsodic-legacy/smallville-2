@@ -139,6 +139,12 @@ class EpisodicStore:
         self._fallback_mode = fallback_only
         self._fallback_memories: dict[str, EpisodicMemory] = {}
         self._counter = 0
+        # Ground-truth count of successful add_memory calls per NPC,
+        # independent of any ChromaDB retrieval. Lets callers (and
+        # get_recent itself) detect a RETRIEVAL GAP — adds happened but
+        # a query returns nothing — which a silent `except: return []`
+        # would otherwise hide. See VECTORIZATION_ROADMAP.md scale bug.
+        self._add_counts: dict[str, int] = {}
 
         # Phase K tag index: per-NPC, per-tag → set of memory_ids.
         # Rebuilt lazily by `initialise` when running against a
@@ -280,7 +286,15 @@ class EpisodicStore:
             for tag in tag_set:
                 npc_bucket.setdefault(tag, set()).add(memory_id)
 
+        # Ground-truth add counter (retrieval-independent).
+        self._add_counts[npc_id] = self._add_counts.get(npc_id, 0) + 1
         return memory_id
+
+    def added_count(self, npc_id: str) -> int:
+        """How many memories were successfully added for this NPC,
+        independent of retrieval. Diverging from a retrieval count is
+        the RETRIEVAL GAP signature."""
+        return self._add_counts.get(npc_id, 0)
 
     def _parse_tags_from_metadata(self, raw: Any) -> set[str]:
         """Turn the scalar-encoded `tags` metadata field back into a set."""
@@ -442,10 +456,27 @@ class EpisodicStore:
                 where=where_filter,
                 include=["documents", "metadatas"],
             )
-        except Exception:
+        except Exception as e:
+            # Previously a silent `return []` — the swallow that hid the
+            # 30-day scale bug. Now loud, with the add-count so a true
+            # failure is distinguishable from a genuinely empty NPC.
+            logger.warning(
+                "get_recent ChromaDB .get failed for npc=%s (added=%d): %s",
+                npc_id, self.added_count(npc_id), e,
+            )
             return []
 
         if not results["ids"]:
+            # RETRIEVAL GAP detector: empty result despite known adds is
+            # the exact 30-day-scale symptom — flag it the moment it
+            # happens rather than discovering it in a post-run dump.
+            added = self.added_count(npc_id)
+            if added > 0 and category is None:
+                logger.warning(
+                    "RETRIEVAL GAP: get_recent returned 0 for npc=%s but "
+                    "%d memories were added — episodic retrieval is "
+                    "dropping this NPC.", npc_id, added,
+                )
             return []
 
         memories = []

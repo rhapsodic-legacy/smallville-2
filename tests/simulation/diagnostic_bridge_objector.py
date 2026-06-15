@@ -234,6 +234,25 @@ def _snapshot_metrics(mgr, npcs, day, prev_tone, events_today):
         pariah, vals = min(incoming.items(), key=lambda kv: _st.mean(kv[1]))
         pariah_mean = _st.mean(vals)
 
+    # Per-NPC memory health: ground-truth adds vs what retrieval returns.
+    # A divergence (added>0, retrieved==0) is the RETRIEVAL GAP — this
+    # turns the run self-diagnosing, pinpointing the onset day. The
+    # per-NPC .get is cheap (metadata-only; ~instant even at 50k docs).
+    ep = mgr.memory.episodic
+    mem_counts = {}
+    gap_npcs = []
+    for n in npcs:
+        added = ep.added_count(n.npc_id)
+        try:
+            retrieved = len(ep.get_recent(
+                n.npc_id, limit=100000, include_compacted=True,
+            ))
+        except Exception:
+            retrieved = -1
+        mem_counts[n.npc_id] = {"added": added, "retrieved": retrieved}
+        if added > 0 and retrieved <= 0:
+            gap_npcs.append(n.name)
+
     snap = {
         "day": day,
         "rels": len(disp),
@@ -249,6 +268,8 @@ def _snapshot_metrics(mgr, npcs, day, prev_tone, events_today):
         "most_disliked": pariah,
         "most_disliked_mean": round(pariah_mean, 1),
         "events": list(events_today),
+        "mem_counts": mem_counts,
+        "retrieval_gap_npcs": gap_npcs,
     }
     return snap, tone_cum
 
@@ -276,12 +297,16 @@ def _print_trajectory_table(timeseries: list[dict]) -> None:
 async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
               dump_path: str | None = None,
               snapshot_every: int = 1,
-              timeseries_path: str | None = None) -> None:
+              timeseries_path: str | None = None,
+              chroma_dir: str | None = None) -> None:
     llm, llm_label = _build_provider(provider)
 
     print("=" * 90)
     print(f"BRIDGE OBJECTOR DIAGNOSTIC  (days={days}, pop={POPULATION}, seed={SEED})")
     print(f"  cognition engine: {llm_label}")
+    if chroma_dir:
+        print(f"  episodic store: PersistentClient at {chroma_dir} "
+              "(survives the process for post-mortem)")
     print("=" * 90)
 
     config = WorldConfig(
@@ -291,9 +316,27 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     gen.generate()
     grid, buildings = gen.grid, gen.buildings
 
+    # When a chroma_dir is given, build the MemoryManager explicitly with a
+    # PERSISTENT episodic store so the ChromaDB collection survives the
+    # process — letting us inspect it post-mortem to root-cause the
+    # retrieval-gap bug. Default (None) keeps the in-memory store.
+    memory = None
+    if chroma_dir:
+        from core.memory.manager import MemoryManager
+        from core.memory.episodic import EpisodicStore
+        from core.memory.structured import StructuredMemory
+        from core.memory.spatial import SpatialMemory
+        memory = MemoryManager(
+            structured=StructuredMemory(":memory:"),
+            episodic=EpisodicStore(persist_directory=chroma_dir),
+            spatial=SpatialMemory(),
+            llm=llm,
+        )
+        memory.initialise()
+
     mgr = NPCManager(
         grid=grid, buildings=buildings,
-        llm=llm, seed=SEED,
+        llm=llm, seed=SEED, memory=memory,
     )
     npcs = mgr.spawn_population(POPULATION)
     clock = GameClock()
@@ -474,6 +517,8 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
                     mgr, npcs, day, _tone_cumulative, events_today,
                 )
                 timeseries.append(snap)
+                gap = snap.get("retrieval_gap_npcs") or []
+                gap_str = f"  !!RETRIEVAL_GAP={gap}" if gap else ""
                 _log(
                     f"[day {day:3d}] SNAPSHOT neg={snap['neg_pct']:.0%} "
                     f"neu={snap['neu_pct']:.0%} pos={snap['pos_pct']:.0%} "
@@ -482,6 +527,7 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
                     f"{snap['tone_today']['neutral']}/{snap['tone_today']['warm']}/"
                     f"{snap['tone_today']['hostile']} "
                     f"pariah={snap['most_disliked']}({snap['most_disliked_mean']:+.0f})"
+                    f"{gap_str}"
                 )
                 if timeseries_path:
                     try:
@@ -704,8 +750,16 @@ if __name__ == "__main__":
         help="Write the per-day trajectory to PATH (JSON), incrementally. "
              "Defaults to <dump>_timeseries.json when --dump is given.",
     )
+    parser.add_argument(
+        "--chroma-dir", default=None, metavar="PATH",
+        help="Use a PERSISTENT ChromaDB episodic store at PATH (survives "
+             "the process for post-mortem inspection of the retrieval-gap "
+             "bug). Default is an in-memory store. Use a FRESH dir per run "
+             "— collections persist and would otherwise mix runs.",
+    )
     args = parser.parse_args()
     asyncio.run(run(days=args.days, provider=args.provider,
                     dump_path=args.dump,
                     snapshot_every=args.snapshot_every,
-                    timeseries_path=args.timeseries))
+                    timeseries_path=args.timeseries,
+                    chroma_dir=args.chroma_dir))
