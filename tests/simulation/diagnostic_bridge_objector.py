@@ -297,16 +297,12 @@ def _print_trajectory_table(timeseries: list[dict]) -> None:
 async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
               dump_path: str | None = None,
               snapshot_every: int = 1,
-              timeseries_path: str | None = None,
-              chroma_dir: str | None = None) -> None:
+              timeseries_path: str | None = None) -> None:
     llm, llm_label = _build_provider(provider)
 
     print("=" * 90)
     print(f"BRIDGE OBJECTOR DIAGNOSTIC  (days={days}, pop={POPULATION}, seed={SEED})")
     print(f"  cognition engine: {llm_label}")
-    if chroma_dir:
-        print(f"  episodic store: PersistentClient at {chroma_dir} "
-              "(survives the process for post-mortem)")
     print("=" * 90)
 
     config = WorldConfig(
@@ -316,27 +312,9 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     gen.generate()
     grid, buildings = gen.grid, gen.buildings
 
-    # When a chroma_dir is given, build the MemoryManager explicitly with a
-    # PERSISTENT episodic store so the ChromaDB collection survives the
-    # process — letting us inspect it post-mortem to root-cause the
-    # retrieval-gap bug. Default (None) keeps the in-memory store.
-    memory = None
-    if chroma_dir:
-        from core.memory.manager import MemoryManager
-        from core.memory.episodic import EpisodicStore
-        from core.memory.structured import StructuredMemory
-        from core.memory.spatial import SpatialMemory
-        memory = MemoryManager(
-            structured=StructuredMemory(":memory:"),
-            episodic=EpisodicStore(persist_directory=chroma_dir),
-            spatial=SpatialMemory(),
-            llm=llm,
-        )
-        memory.initialise()
-
     mgr = NPCManager(
         grid=grid, buildings=buildings,
-        llm=llm, seed=SEED, memory=memory,
+        llm=llm, seed=SEED,
     )
     npcs = mgr.spawn_population(POPULATION)
     clock = GameClock()
@@ -750,16 +728,8 @@ if __name__ == "__main__":
         help="Write the per-day trajectory to PATH (JSON), incrementally. "
              "Defaults to <dump>_timeseries.json when --dump is given.",
     )
-    parser.add_argument(
-        "--chroma-dir", default=None, metavar="PATH",
-        help="Use a PERSISTENT ChromaDB episodic store at PATH (survives "
-             "the process for post-mortem inspection of the retrieval-gap "
-             "bug). Default is an in-memory store. Use a FRESH dir per run "
-             "— collections persist and would otherwise mix runs.",
-    )
     args = parser.parse_args()
     asyncio.run(run(days=args.days, provider=args.provider,
                     dump_path=args.dump,
                     snapshot_every=args.snapshot_every,
-                    timeseries_path=args.timeseries,
-                    chroma_dir=args.chroma_dir))
+                    timeseries_path=args.timeseries))
