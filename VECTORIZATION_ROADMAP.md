@@ -439,9 +439,39 @@ Impact: false-negatived C1 dissent (META-VERDICT INVALID is itself the
 artifact — Jasper's `opposes:repair_bridge=1.0` renders into his prompt);
 voice computable on 7/10; blocks per-NPC memory-correlation for the 3.
 
-**Next steps (for discussion):** (1) make the failure VISIBLE — log the
-swallowed exception in `get_recent` + a count; (2) add per-NPC memory count
-to the daily snapshot to pinpoint onset day; (3) switch the diagnostic to
-`PersistentClient` for post-mortem inspection; (4) re-run / instrumented
-repro to catch it red-handed. The episodic layer can't be trusted at
-30-day scale until understood. Trajectory result is independent and stands.
+**Instrumentation shipped (2026-06-15):** (1) `get_recent` un-silenced —
+logs the swallowed exception + a live `RETRIEVAL GAP` warning when it
+returns empty despite known adds; (2) `EpisodicStore.added_count()`
+ground-truth counter; (3) per-NPC `{added,retrieved}` + `retrieval_gap_npcs`
+in the daily snapshot; (4) `--chroma-dir` PersistentClient option +
+`tests/simulation/repro_retrieval_gap.py` (LLM-free real-embedding stress
+harness). Full suite 1406 green.
+
+**Repro result — DEFINITIVE NEGATIVE.** The harness drove the REAL
+EpisodicStore (real ONNX embeddings, in-memory client — matching the
+diagnostic) to **80,000 docs (8000/NPC), round-robin interleaved, with
+40% tombstone (compaction) churn**. Every NPC retrieved perfectly
+(8000/8000) at every checkpoint, well past the ~50k 30-day scale. So the
+gap is NOT caused by: data scale, real embeddings, interleaving, or
+tombstone-update churn — in any combination.
+
+**Remaining untested variables (the live hypotheses), in priority order:**
+1. **`delete_by_metadata` churn** — the real sim consolidates conversation
+   turns by DELETING them (`consolidate_conversation_turns` →
+   `delete_by_metadata("conversation_id", …)`), a massive add+delete cycle
+   on `conversation_turn` entries. The repro only ADDED and tombstoned,
+   never deleted. This is the clearest untested difference and the cheapest
+   next test.
+2. **Concurrency** — the sim runs cognition via `asyncio.gather` (e.g. both
+   conversation partners reflect concurrently); the repro is sequential.
+   (Lower prior: ChromaDB calls are synchronous, so true interleaving is
+   limited — but worth ruling out.)
+3. **Process longevity** (25h vs 3.3h) — least likely for a data-structure
+   bug; hard to test cheaply.
+
+**Recommended next step:** extend the repro with `delete_by_metadata`
+conversation-turn churn (cheap, hours not a day) before committing to a
+25h instrumented re-run. If that reproduces, root cause is found fast; if
+not, the instrumented diagnostic re-run (`--chroma-dir` + per-NPC snapshot
++ live GAP warning) will catch the onset day and leave an inspectable
+collection. Trajectory result is independent and stands throughout.
