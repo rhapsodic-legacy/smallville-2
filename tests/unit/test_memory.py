@@ -29,10 +29,8 @@ def structured():
 
 @pytest.fixture
 def episodic():
-    """In-memory episodic store (forced fallback mode for test isolation)."""
-    store = EpisodicStore()
-    store._fallback_mode = True  # skip ChromaDB to avoid shared state
-    return store
+    """In-memory episodic store (each instance is isolated)."""
+    return EpisodicStore()
 
 
 @pytest.fixture
@@ -49,7 +47,6 @@ def mock_llm():
 def memory_mgr(mock_llm):
     """Full memory manager with in-memory backends."""
     episodic = EpisodicStore()
-    episodic._fallback_mode = True  # force isolation
     mgr = MemoryManager(episodic=episodic, llm=mock_llm)
     mgr.initialise()
     yield mgr
@@ -210,31 +207,13 @@ class TestEpisodicStore:
         assert episodic.added_count("npc_2") == 1
         assert episodic.added_count("absent") == 0
 
-    def test_added_count_is_retrieval_independent(self, episodic):
-        # The whole point: even if retrieval were to drop an NPC, the
-        # add-count still reflects what was stored — so a divergence is
-        # detectable rather than silently invisible.
+    def test_added_count_matches_stored(self, episodic):
+        # added_count tracks stored memories; with the simple dict store
+        # nothing is hidden, so retrieval and add-count agree.
         for i in range(5):
             episodic.add_memory("npc_1", f"m{i}", game_time=i)
-        episodic._fallback_memories.clear()  # simulate retrieval losing them
-        assert episodic.get_recent("npc_1") == []
-        assert episodic.added_count("npc_1") == 5  # ground truth survives
-
-    def test_get_recent_real_store_no_false_gap(self, caplog):
-        # On a healthy REAL ChromaDB store, get_recent must retrieve what
-        # was added and must NOT emit a spurious RETRIEVAL GAP warning.
-        store = EpisodicStore()
-        store.initialise()
-        if store._fallback_mode:
-            import pytest
-            pytest.skip("ChromaDB unavailable")
-        for i in range(8):
-            store.add_memory("npc_x", f"obs {i}", game_time=float(i))
-        import logging
-        with caplog.at_level(logging.WARNING):
-            got = store.get_recent("npc_x", limit=100, include_compacted=True)
-        assert len(got) == 8
-        assert "RETRIEVAL GAP" not in caplog.text
+        assert episodic.added_count("npc_1") == 5
+        assert len(episodic.get_recent("npc_1", limit=100)) == 5
 
     def test_retrieve_by_relevance(self, episodic):
         episodic.add_memory("npc_1", "Alice the blacksmith is working", game_time=100)
@@ -297,7 +276,7 @@ class TestEpisodicStore:
 
         stats = episodic.get_stats()
         assert stats["total_memories"] == 2
-        assert stats["backend"] == "in-memory fallback"
+        assert stats["backend"] == "in-memory text store"
 
 
 # ======== Spatial Memory Tests ========

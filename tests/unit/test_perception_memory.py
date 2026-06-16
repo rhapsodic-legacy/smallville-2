@@ -46,22 +46,10 @@ def sentiment():
 
 @pytest.fixture
 def memory(sentiment):
-    episodic = EpisodicStore(fallback_only=True)
+    episodic = EpisodicStore()
     mm = MemoryManager(llm=MockProvider(), sentiment=sentiment, episodic=episodic)
     mm.initialise()
-    # Clear any leftover data from previous tests sharing the same
-    # in-process ChromaDB collection.
-    if mm.episodic._collection is not None:
-        try:
-            mm.episodic._client.delete_collection("npc_episodic_memory")
-            mm.episodic._collection = mm.episodic._client.create_collection(
-                name="npc_episodic_memory",
-                metadata={"hnsw:space": "cosine"},
-            )
-        except Exception:
-            pass
-    mm.episodic._fallback_memories.clear()
-    mm.episodic._counter = 0
+    # Each store is its own in-memory dict — no shared state to scrub.
     return mm
 
 

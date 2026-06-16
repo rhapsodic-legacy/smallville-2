@@ -411,9 +411,10 @@ class TestDaySummaryPrompt:
 # ---------- H.3: retrieval prefers summaries over raw ----------
 
 class TestRetrievalHidesTombstoned:
-    """Once compact_day tombstones originals, default retrieval
-    paths should hide them in favour of the day_summary. Diagnostics
-    can still ask for them with `include_compacted=True`."""
+    """Simple store: nothing is hidden. compact_day adds a day_summary
+    but the raw memories it summarised stay visible in retrieval
+    (observability — we want to see every NPC thought). `compacted_into`
+    metadata is still written for provenance, but no read filters on it."""
 
     def _seed_and_compact(self):
         mgr = _mgr()
@@ -433,16 +434,15 @@ class TestRetrievalHidesTombstoned:
         summary_id = asyncio.run(compact_day(mgr, "bran", 0, llm=None))
         return mgr, obs_id, tagged_id, summary_id
 
-    def test_retrieve_hides_tombstoned_raw(self):
+    def test_retrieve_keeps_raw_visible(self):
         mgr, obs_id, tagged_id, summary_id = self._seed_and_compact()
         results = mgr.episodic.retrieve(
             npc_id="bran", query="wood chopping",
-            current_game_time=_day_time(1, 0),
+            current_game_time=_day_time(1, 0), limit=50,
         )
         ids = {r.memory.memory_id for r in results}
-        assert obs_id not in ids
-        # Summary + tagged survive and are retrievable.
-        assert summary_id in ids or tagged_id in ids
+        # Nothing hidden: the raw observation is still retrievable.
+        assert obs_id in ids
 
     def test_retrieve_include_compacted_shows_provenance(self):
         mgr, obs_id, _, _ = self._seed_and_compact()
@@ -454,12 +454,13 @@ class TestRetrievalHidesTombstoned:
         ids = {r.memory.memory_id for r in results}
         assert obs_id in ids
 
-    def test_get_recent_hides_tombstoned(self):
+    def test_get_recent_keeps_raw_visible(self):
         mgr, obs_id, _, summary_id = self._seed_and_compact()
-        recents = mgr.episodic.get_recent("bran", limit=20)
+        recents = mgr.episodic.get_recent("bran", limit=50)
         recent_ids = {m.memory_id for m in recents}
-        assert obs_id not in recent_ids
-        assert summary_id in recent_ids
+        assert obs_id in recent_ids       # raw not hidden
+        if summary_id:
+            assert summary_id in recent_ids  # summary present too
 
     def test_get_recent_include_compacted_shows_tombstoned(self):
         mgr, obs_id, _, _ = self._seed_and_compact()
@@ -481,24 +482,25 @@ class TestRetrievalHidesTombstoned:
             category="observation", game_time=_day_time(1, 60),
         )
         asyncio.run(compact_day(mgr, "bran", 0, llm=None))
-        recents = mgr.episodic.get_recent("bran", limit=20)
+        recents = mgr.episodic.get_recent("bran", limit=50)
         recent_ids = {m.memory_id for m in recents}
-        assert yesterday_id not in recent_ids  # compacted
-        assert today_id in recent_ids          # still raw
+        # Nothing hidden: both days' raw memories remain visible.
+        assert yesterday_id in recent_ids
+        assert today_id in recent_ids
 
     def test_tagged_memory_still_retrievable_by_tag(self):
         mgr, _, tagged_id, _ = self._seed_and_compact()
         hits = mgr.episodic.retrieve_by_tags("bran", ["bread"])
         assert any(m.memory_id == tagged_id for m in hits)
 
-    def test_get_memories_in_window_hides_tombstoned_by_default(self):
+    def test_get_memories_in_window_keeps_raw_visible(self):
         mgr, obs_id, _, summary_id = self._seed_and_compact()
         # Window covers day 0 (where the original observation lives).
         mems = mgr.episodic.get_memories_in_window(
             "bran", _day_time(0), _day_time(1),
         )
         ids = {m.memory_id for m in mems}
-        assert obs_id not in ids
+        assert obs_id in ids  # nothing hidden
 
     def test_get_memories_in_window_include_compacted_restores(self):
         mgr, obs_id, _, _ = self._seed_and_compact()
@@ -509,22 +511,18 @@ class TestRetrievalHidesTombstoned:
         ids = {m.memory_id for m in mems}
         assert obs_id in ids
 
-    def test_retrieve_by_tags_hides_tombstoned_when_present(self):
-        """Defensive: tagged memories bypass compaction today, but
-        if a future rollup ever tombstones a tagged memory, the
-        same filter should apply consistently."""
+    def test_retrieve_by_tags_returns_regardless_of_compacted_mark(self):
+        """Nothing is hidden: a `compacted_into` mark does not remove a
+        tagged memory from tag retrieval."""
         mgr = _mgr()
         mid = mgr.episodic.add_memory(
             npc_id="bran", description="phantom",
             tags={"bread"}, game_time=_day_time(0, 10),
         )
         mgr.episodic.update_metadata(mid, {"compacted_into": "fake"})
-        assert mgr.episodic.retrieve_by_tags("bran", ["bread"]) == []
-        # Opt-in still returns it.
-        hits = mgr.episodic.retrieve_by_tags(
-            "bran", ["bread"], include_compacted=True,
-        )
+        hits = mgr.episodic.retrieve_by_tags("bran", ["bread"])
         assert len(hits) == 1
+        assert hits[0].memory_id == mid
 
 
 # ---------- H.4: week-level rollup ----------
@@ -641,19 +639,19 @@ class TestCompactWeek:
         summary = mgr.episodic.get_by_id(summary_id)
         assert summary.game_time == _day_time(DAYS_PER_WEEK) - 1.0
 
-    def test_week_summary_hides_day_summaries_in_retrieval(self):
-        """After rollup, get_recent should surface the week_summary
-        and hide the rolled-up day_summaries."""
+    def test_week_summary_added_without_hiding_day_summaries(self):
+        """After rollup the week_summary is present; nothing is hidden,
+        so the rolled-up day_summaries remain visible too."""
         mgr = _mgr()
         ids = self._seed_week(mgr, week=0)
         day_ids = [i for i in ids if not i.startswith("TAGGED:")]
         summary_id = asyncio.run(compact_week(mgr, "bran", 0, llm=None))
 
-        recents = mgr.episodic.get_recent("bran", limit=50)
+        recents = mgr.episodic.get_recent("bran", limit=200)
         recent_ids = {m.memory_id for m in recents}
-        for did in day_ids:
-            assert did not in recent_ids
         assert summary_id in recent_ids
+        for did in day_ids:
+            assert did in recent_ids
 
     def test_noop_when_no_day_summaries_in_window(self):
         mgr = _mgr()
@@ -773,10 +771,10 @@ class TestProvenanceChain:
             category="observation", game_time=_day_time(0, 60),
         )
         asyncio.run(compact_day(mgr, "bran", 0, llm=None))
-        # Default retrieval no longer returns it.
-        recents = mgr.episodic.get_recent("bran", limit=20)
-        assert raw_id not in {m.memory_id for m in recents}
-        # But get_raw_by_id does.
+        # Nothing hidden: the raw stays in normal retrieval...
+        recents = mgr.episodic.get_recent("bran", limit=50)
+        assert raw_id in {m.memory_id for m in recents}
+        # ...and get_raw_by_id fetches it directly too.
         raw = mgr.episodic.get_raw_by_id(raw_id)
         assert raw is not None
         assert raw.description == "I chopped wood."
