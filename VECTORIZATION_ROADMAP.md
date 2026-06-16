@@ -469,9 +469,27 @@ tombstone-update churn — in any combination.
 3. **Process longevity** (25h vs 3.3h) — least likely for a data-structure
    bug; hard to test cheaply.
 
-**Recommended next step:** extend the repro with `delete_by_metadata`
-conversation-turn churn (cheap, hours not a day) before committing to a
-25h instrumented re-run. If that reproduces, root cause is found fast; if
-not, the instrumented diagnostic re-run (`--chroma-dir` + per-NPC snapshot
-+ live GAP warning) will catch the onset day and leave an inspectable
-collection. Trajectory result is independent and stands throughout.
+**Delete-churn repro — ALSO a definitive negative.** Modelled the sim's
+exact conversation-turn lifecycle (add turns → add summary →
+`delete_by_metadata("conversation_id")`) at **60,000 surviving docs across
+420,000 add/delete operations** — every NPC retrieved perfectly. So
+deletion is exonerated too.
+
+**Reproductions have now ruled out every tractable data-pattern cause:**
+scale (80k), real ONNX embeddings, round-robin interleaving, tombstone/
+update churn, and delete_by_metadata churn — none reproduce the gap. The
+concurrency hypothesis is also weak on reflection: EpisodicStore's methods
+are synchronous, so the sim's `asyncio.gather` serialises ChromaDB access
+rather than truly interleaving it. What remains is **process longevity
+(~25h)** or a real-sim condition not captured synthetically — neither
+cheaply testable.
+
+**Conclusion + recommendation.** Root cause is not determinable from cheap
+experiments; the only remaining probe is the instrumented full re-run
+(`--chroma-dir` + per-NPC snapshot + live `RETRIEVAL GAP` warning), a ~25h
+commitment. Recommendation: **do NOT spend 25h on a dedicated debug run
+now.** The bug does not affect the validated results (sentiment/self are
+SQLite), and the instrumentation is permanent — the next long run done for
+any reason will auto-catch the onset day and leave an inspectable
+collection. Bank the instrumentation; treat the bug as OPEN-but-contained;
+revisit opportunistically. The vectorization arc's conclusion stands.
