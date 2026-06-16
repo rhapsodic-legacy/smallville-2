@@ -234,25 +234,6 @@ def _snapshot_metrics(mgr, npcs, day, prev_tone, events_today):
         pariah, vals = min(incoming.items(), key=lambda kv: _st.mean(kv[1]))
         pariah_mean = _st.mean(vals)
 
-    # Per-NPC memory health: ground-truth adds vs what retrieval returns.
-    # A divergence (added>0, retrieved==0) is the RETRIEVAL GAP — this
-    # turns the run self-diagnosing, pinpointing the onset day. The
-    # per-NPC .get is cheap (metadata-only; ~instant even at 50k docs).
-    ep = mgr.memory.episodic
-    mem_counts = {}
-    gap_npcs = []
-    for n in npcs:
-        added = ep.added_count(n.npc_id)
-        try:
-            retrieved = len(ep.get_recent(
-                n.npc_id, limit=100000, include_compacted=True,
-            ))
-        except Exception:
-            retrieved = -1
-        mem_counts[n.npc_id] = {"added": added, "retrieved": retrieved}
-        if added > 0 and retrieved <= 0:
-            gap_npcs.append(n.name)
-
     snap = {
         "day": day,
         "rels": len(disp),
@@ -268,8 +249,6 @@ def _snapshot_metrics(mgr, npcs, day, prev_tone, events_today):
         "most_disliked": pariah,
         "most_disliked_mean": round(pariah_mean, 1),
         "events": list(events_today),
-        "mem_counts": mem_counts,
-        "retrieval_gap_npcs": gap_npcs,
     }
     return snap, tone_cum
 
@@ -495,8 +474,6 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
                     mgr, npcs, day, _tone_cumulative, events_today,
                 )
                 timeseries.append(snap)
-                gap = snap.get("retrieval_gap_npcs") or []
-                gap_str = f"  !!RETRIEVAL_GAP={gap}" if gap else ""
                 _log(
                     f"[day {day:3d}] SNAPSHOT neg={snap['neg_pct']:.0%} "
                     f"neu={snap['neu_pct']:.0%} pos={snap['pos_pct']:.0%} "
@@ -505,7 +482,6 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
                     f"{snap['tone_today']['neutral']}/{snap['tone_today']['warm']}/"
                     f"{snap['tone_today']['hostile']} "
                     f"pariah={snap['most_disliked']}({snap['most_disliked_mean']:+.0f})"
-                    f"{gap_str}"
                 )
                 if timeseries_path:
                     try:

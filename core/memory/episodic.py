@@ -145,9 +145,6 @@ class EpisodicStore:
         self._persist_dir = persist_directory
         self._memories: dict[str, EpisodicMemory] = {}
         self._counter = 0
-        # Ground-truth add count per NPC (== live count, since nothing
-        # is hidden; retrieval cannot diverge from it).
-        self._add_counts: dict[str, int] = {}
         # Per-NPC, per-tag -> set of memory_ids, for O(1) tag lookup.
         self._tag_index: dict[str, dict[str, set[str]]] = {}
 
@@ -211,12 +208,7 @@ class EpisodicStore:
             bucket = self._tag_index.setdefault(npc_id, {})
             for tag in tag_set:
                 bucket.setdefault(tag, set()).add(memory_id)
-        self._add_counts[npc_id] = self._add_counts.get(npc_id, 0) + 1
         return memory_id
-
-    def added_count(self, npc_id: str) -> int:
-        """How many memories were stored for this NPC."""
-        return self._add_counts.get(npc_id, 0)
 
     def _for_npc(self, npc_id: str) -> list[EpisodicMemory]:
         return [m for m in self._memories.values() if m.npc_id == npc_id]

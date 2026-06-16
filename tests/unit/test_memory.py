@@ -196,25 +196,6 @@ class TestEpisodicStore:
         assert len(recent) == 2
         assert recent[0].game_time == 300  # most recent first
 
-    def test_added_count_tracks_adds_per_npc(self, episodic):
-        # Ground-truth counter for the RETRIEVAL GAP detector — counts
-        # successful adds independent of retrieval.
-        assert episodic.added_count("npc_1") == 0
-        episodic.add_memory("npc_1", "a", game_time=1)
-        episodic.add_memory("npc_1", "b", game_time=2)
-        episodic.add_memory("npc_2", "c", game_time=3)
-        assert episodic.added_count("npc_1") == 2
-        assert episodic.added_count("npc_2") == 1
-        assert episodic.added_count("absent") == 0
-
-    def test_added_count_matches_stored(self, episodic):
-        # added_count tracks stored memories; with the simple dict store
-        # nothing is hidden, so retrieval and add-count agree.
-        for i in range(5):
-            episodic.add_memory("npc_1", f"m{i}", game_time=i)
-        assert episodic.added_count("npc_1") == 5
-        assert len(episodic.get_recent("npc_1", limit=100)) == 5
-
     def test_retrieve_by_relevance(self, episodic):
         episodic.add_memory("npc_1", "Alice the blacksmith is working", game_time=100)
         episodic.add_memory("npc_1", "Bob the farmer is sleeping", game_time=200)
