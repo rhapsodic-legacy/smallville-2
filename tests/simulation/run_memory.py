@@ -242,8 +242,122 @@ def synopsise(path: str) -> None:
     print(line)
 
 
+# --------------------------------------------------------------------------- #
+# Stage 1.5 — thorough, file-written run summary (for run-to-run comparison)
+# --------------------------------------------------------------------------- #
+def _top_repeated(memories: list[dict], top: int = 8) -> list[tuple[str, int]]:
+    """Most-repeated memory lines (category + first 60 chars), count >= 2.
+    Surfaces the repetitive-thinking / inane-observation behaviour
+    (e.g. "Sam was talking near me" recorded 30+ times)."""
+    sig = Counter(
+        f"[{m['category']}] {m['description'][:60]}" for m in memories
+    )
+    return [(text, c) for text, c in sig.most_common(top) if c >= 2]
+
+
+def summarise_run(path: str, out_path: str | None = None) -> str:
+    """Write a thorough, human-readable summary of a run to a text file
+    so it (and a context-wiped future reader) can compare one run to a
+    previous one without re-reading the raw dump. Returns the path
+    written. Descriptive only — what the NPCs thought, how much, what
+    they repeated, where they ended up. No scored metrics."""
+    data = json.loads(pathlib.Path(path).read_text())
+    meta, npcs = data["meta"], data["npcs"]
+    if out_path is None:
+        out_path = path.rsplit(".", 1)[0] + "_summary.txt"
+
+    L: list[str] = []
+    def emit(s: str = "") -> None:
+        L.append(s)
+
+    bar = "=" * 84
+    emit(bar)
+    emit(f"RUN SUMMARY — event={meta.get('event')} provider={meta.get('provider')} "
+         f"days={meta.get('days')} pop={len(npcs)} seed={meta.get('seed')}")
+    if "cycles" in meta:
+        emit(f"  event cycles: {dict(Counter(c.get('status') for c in meta['cycles']))}")
+    emit(bar)
+
+    # ---- Town roll-up ----
+    total_mem = sum(n["n_memories"] for n in npcs)
+    cat = Counter()
+    for n in npcs:
+        cat.update(m["category"] for m in n["memories"])
+    disp = [s["disposition"] for n in npcs for s in n["sentiments"]]
+    emit("\nTOWN")
+    emit(f"  memories: {total_mem} total, {total_mem/max(len(npcs),1):.0f}/NPC")
+    emit(f"  by category: {dict(cat.most_common())}")
+    if disp:
+        emit(f"  relationships: {len(disp)}, mean disposition "
+             f"{sum(disp)/len(disp):+.1f}, "
+             f"range [{min(disp):+.0f}, {max(disp):+.0f}]")
+
+    # ---- Repetition / spam (town-wide) ----
+    all_mem = [m for n in npcs for m in n["memories"]]
+    rep = _top_repeated(all_mem, top=12)
+    emit("\nMOST-REPEATED THOUGHTS (town-wide — repetition / inane-observation check)")
+    if rep:
+        for text, c in rep:
+            emit(f"  x{c:<4d} {text!r}")
+    else:
+        emit("  (no line repeated)")
+
+    # ---- Per-NPC digest ----
+    emit("\nPER-NPC")
+    for n in sorted(npcs, key=lambda x: -x["n_memories"]):
+        ncat = Counter(m["category"] for m in n["memories"])
+        top_sc = sorted(n["self_concept"].items(), key=lambda kv: -kv[1])[:5]
+        sents = sorted(n["sentiments"], key=lambda s: s["disposition"])
+        liked = [s for s in sents if s["disposition"] > 5][-3:]
+        disliked = [s for s in sents if s["disposition"] < -5][:3]
+        emit(f"\n  {n['name']} ({n['occupation']}) — {n['n_memories']} memories "
+             f"{dict(ncat.most_common())}")
+        emit(f"    self-concept: {[f'{k}={v:.1f}' for k, v in top_sc] or '(none)'}")
+        if liked:
+            emit(f"    likes: {[(s['to_name'], round(s['disposition'])) for s in reversed(liked)]}")
+        if disliked:
+            emit(f"    dislikes: {[(s['to_name'], round(s['disposition'])) for s in disliked]}")
+        # The NPC's own day-by-day recollections (already LLM-generated
+        # in-sim with their guardrails) — the thread of what they thought.
+        recolls = sorted(
+            (m for m in n["memories"]
+             if m["category"] in ("day_summary", "week_summary")),
+            key=lambda m: m.get("game_time", 0),
+        )
+        if recolls:
+            emit("    recollections:")
+            for m in recolls:
+                emit(f"      d{int(m.get('game_time',0)//1440)}: {m['description']}")
+        npc_rep = _top_repeated(n["memories"], top=3)
+        if npc_rep:
+            emit(f"    repeated: {[f'x{c} {t[:40]}' for t, c in npc_rep]}")
+
+    # ---- Compact comparison line (diff two runs at a glance) ----
+    emit("\nCOMPARISON LINE")
+    emit("  " + json.dumps({
+        "event": meta.get("event"), "provider": meta.get("provider"),
+        "days": meta.get("days"), "pop": len(npcs),
+        "mem_per_npc": round(total_mem / max(len(npcs), 1), 1),
+        "mean_disposition": round(sum(disp)/len(disp), 1) if disp else 0,
+        "zero_memory_npcs": sum(1 for n in npcs if n["n_memories"] == 0),
+        "town_repeats": len(rep),
+    }))
+    emit(bar)
+
+    text = "\n".join(L)
+    pathlib.Path(out_path).write_text(text)
+    print(text)
+    print(f"\n[summary] written -> {out_path}")
+    return out_path
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    if len(args) == 2 and args[0] == "summary":
+        summarise_run(args[1])
+    elif len(args) == 1:
+        synopsise(args[0])
+    else:
         print("usage: python3 tests/simulation/run_memory.py <dump.json>")
+        print("       python3 tests/simulation/run_memory.py summary <dump.json>")
         sys.exit(1)
-    synopsise(sys.argv[1])

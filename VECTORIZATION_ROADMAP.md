@@ -365,3 +365,131 @@ drowning, churn) untouched **by design** — the conversation-volume
 policy (Arc C) is a separate decision, not a homogenisation bug. The
 30-day emergence-run gate is **reopened**, conditional on the
 temperament-bank rebalance above.
+
+## 30-day "living world" run (2026-06-14/15, runs/full30_living_world.json)
+
+First full 30-day run, on the rebalanced temperament bank, with daily
+trajectory snapshots. **Two things to record: a strong valid result,
+and a real scale bug that limits part of the analysis.**
+
+**VALID result — the sentiment trajectory (the question the run asked).**
+Computed from the SQLite sentiment table + self_concept (both intact),
+so unaffected by the memory bug below. The town **converged smoothly to
+a stable, individuated equilibrium** — not a roller-coaster, not uniform
+convergence, not collapse:
+- pos 24%→~77%, neg 0%→~17%, neutral 76%→~7% (the lukewarm middle drained
+  into both tails = individuation), mean +3.3→+18.1. Reached steady state
+  by ~day 10-13 and held it for the remaining ~17 days.
+- Individuality verdict **SYSTEMIC (4 sources) → LOCALISED (1)** — only
+  volume-drowning (6%, the deliberately-deferred Arc C) remains. Voice
+  0.05 (on the 7 readable NPCs), self-keys 20.7, near-dup churn down to
+  14% (compaction working).
+- Emergent society (from intact sentiment data): beloved figures (Voss
+  +27, Calla +25, Dara +22); a curmudgeon — **Xander** soured into
+  misanthropy (dislikes ~everyone, town cooled to +1.0); a genuine
+  two-sided **feud** Xander↔Dorian (mutual strong dislike WITH high
+  resonance — alike enough to clash); the principled objector **Jasper**
+  at +14 (his opposition cost him relative standing, C3 −5.9, but he is
+  NOT an outcast). Shared culture emerged: `built:bridge` / `role:bridge`
+  / `helped:festival` held by ≥half the town — a collective bridge-builder
+  identity formed from shared events. Bridges completed 4/4.
+
+**SCALE BUG — episodic `get_recent` returns empty for some NPCs at
+30-day scale (investigated 2026-06-15; root cause still OPEN).**
+3/10 NPCs (Voss, Calla, Jasper) return **0 episodic memories** from
+`get_recent(..., include_compacted=True)` at the end of the run. Signature:
+**sudden, all-or-nothing per-NPC zeroing at scale** — at 6 days those same
+3 were normal/high activity (Voss & Calla at the 5000 cap, Jasper 3710),
+at 30 days they are exactly 0 while the other 7 are exactly 5000.
+
+Investigation (what it is NOT):
+- NOT my changes — memory layer untouched; all three 6-day runs had 0
+  affected NPCs.
+- NOT tombstoning — dump passes `include_compacted=True`.
+- NOT storage/retrieval-at-scale — **reproduction with a 53k-doc
+  collection + 21k compaction-style metadata-update churn returned correct
+  per-NPC counts for all 10**, disproving the original "ChromaDB at-scale
+  retrieval failure" prognosis.
+- NOT `update_metadata` (preserves `npc_id`) nor `delete_by_metadata`
+  (targeted by unique `conversation_id`).
+- Run log is CLEAN — zero ChromaDB/embedding/memory errors. Because
+  `get_recent`'s ChromaDB path ends in `except Exception: return []`
+  (SILENT), a failed `.get()` is indistinguishable from a genuinely empty
+  result. **That silent swallow is the bug that hides the bug.**
+
+Open hypotheses (need instrumentation): (a) `collection.get(where={npc_id})`
+throws only with REAL ONNX embeddings + ~50k docs + long-lived in-memory
+client (untriggerable with synthetic embeddings); (b) memories became
+unreadable for another un-reproduced reason. Can't inspect post-mortem:
+diagnostic uses in-memory `chromadb.Client()`, so the collection died with
+the process.
+
+Extent / isolation:
+- Sentiment + self_concept are SQLite — UNAFFECTED; the 30-day trajectory
+  result stands on its own.
+- Cognition CORE retrieval (`retrieve_context` → `.query`, capped ≤100) is
+  a different ChromaDB API and is robust — planning worked for all NPCs.
+- `get_recent` (unbounded `.get(where=)`) also feeds reflection focal
+  points, conversation unresolved-matters, replan, self-review. IF the
+  failure was present in the late run, those 3 NPCs' reflection/replan
+  context was silently empty in the final stretch — degraded, not crashed.
+  Onset day unknown: the daily snapshot didn't track per-NPC memory counts.
+
+Impact: false-negatived C1 dissent (META-VERDICT INVALID is itself the
+artifact — Jasper's `opposes:repair_bridge=1.0` renders into his prompt);
+voice computable on 7/10; blocks per-NPC memory-correlation for the 3.
+
+**Instrumentation shipped (2026-06-15):** (1) `get_recent` un-silenced —
+logs the swallowed exception + a live `RETRIEVAL GAP` warning when it
+returns empty despite known adds; (2) `EpisodicStore.added_count()`
+ground-truth counter; (3) per-NPC `{added,retrieved}` + `retrieval_gap_npcs`
+in the daily snapshot; (4) `--chroma-dir` PersistentClient option +
+`tests/simulation/repro_retrieval_gap.py` (LLM-free real-embedding stress
+harness). Full suite 1406 green.
+
+**Repro result — DEFINITIVE NEGATIVE.** The harness drove the REAL
+EpisodicStore (real ONNX embeddings, in-memory client — matching the
+diagnostic) to **80,000 docs (8000/NPC), round-robin interleaved, with
+40% tombstone (compaction) churn**. Every NPC retrieved perfectly
+(8000/8000) at every checkpoint, well past the ~50k 30-day scale. So the
+gap is NOT caused by: data scale, real embeddings, interleaving, or
+tombstone-update churn — in any combination.
+
+**Remaining untested variables (the live hypotheses), in priority order:**
+1. **`delete_by_metadata` churn** — the real sim consolidates conversation
+   turns by DELETING them (`consolidate_conversation_turns` →
+   `delete_by_metadata("conversation_id", …)`), a massive add+delete cycle
+   on `conversation_turn` entries. The repro only ADDED and tombstoned,
+   never deleted. This is the clearest untested difference and the cheapest
+   next test.
+2. **Concurrency** — the sim runs cognition via `asyncio.gather` (e.g. both
+   conversation partners reflect concurrently); the repro is sequential.
+   (Lower prior: ChromaDB calls are synchronous, so true interleaving is
+   limited — but worth ruling out.)
+3. **Process longevity** (25h vs 3.3h) — least likely for a data-structure
+   bug; hard to test cheaply.
+
+**Delete-churn repro — ALSO a definitive negative.** Modelled the sim's
+exact conversation-turn lifecycle (add turns → add summary →
+`delete_by_metadata("conversation_id")`) at **60,000 surviving docs across
+420,000 add/delete operations** — every NPC retrieved perfectly. So
+deletion is exonerated too.
+
+**Reproductions have now ruled out every tractable data-pattern cause:**
+scale (80k), real ONNX embeddings, round-robin interleaving, tombstone/
+update churn, and delete_by_metadata churn — none reproduce the gap. The
+concurrency hypothesis is also weak on reflection: EpisodicStore's methods
+are synchronous, so the sim's `asyncio.gather` serialises ChromaDB access
+rather than truly interleaving it. What remains is **process longevity
+(~25h)** or a real-sim condition not captured synthetically — neither
+cheaply testable.
+
+**Conclusion + recommendation.** Root cause is not determinable from cheap
+experiments; the only remaining probe is the instrumented full re-run
+(`--chroma-dir` + per-NPC snapshot + live `RETRIEVAL GAP` warning), a ~25h
+commitment. Recommendation: **do NOT spend 25h on a dedicated debug run
+now.** The bug does not affect the validated results (sentiment/self are
+SQLite), and the instrumentation is permanent — the next long run done for
+any reason will auto-catch the onset day and leave an inspectable
+collection. Bank the instrumentation; treat the bug as OPEN-but-contained;
+revisit opportunistically. The vectorization arc's conclusion stands.

@@ -29,10 +29,8 @@ def structured():
 
 @pytest.fixture
 def episodic():
-    """In-memory episodic store (forced fallback mode for test isolation)."""
-    store = EpisodicStore()
-    store._fallback_mode = True  # skip ChromaDB to avoid shared state
-    return store
+    """In-memory episodic store (each instance is isolated)."""
+    return EpisodicStore()
 
 
 @pytest.fixture
@@ -49,7 +47,6 @@ def mock_llm():
 def memory_mgr(mock_llm):
     """Full memory manager with in-memory backends."""
     episodic = EpisodicStore()
-    episodic._fallback_mode = True  # force isolation
     mgr = MemoryManager(episodic=episodic, llm=mock_llm)
     mgr.initialise()
     yield mgr
@@ -260,7 +257,7 @@ class TestEpisodicStore:
 
         stats = episodic.get_stats()
         assert stats["total_memories"] == 2
-        assert stats["backend"] == "in-memory fallback"
+        assert stats["backend"] == "in-memory text store"
 
 
 # ======== Spatial Memory Tests ========
