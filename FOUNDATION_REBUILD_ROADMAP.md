@@ -1,4 +1,4 @@
-# Foundation Rebuild — Scheduling, Commitments & Collective Behaviour 
+# Foundation Rebuild — Scheduling, Commitments & Collective Behaviour  
 
 > Started 2026-06-03. A holistic rebuild of the NPC scheduling /
 > planning / execution / town-goal-contribution foundation. This is a
