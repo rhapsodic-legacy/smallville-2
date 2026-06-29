@@ -1,4 +1,4 @@
-# Failed Approaches Log     
+# Failed Approaches Log      
 
 Record of what was tried and why it failed, so we don't repeat mistakes.
 
