@@ -1,4 +1,4 @@
-# Smallville 2 — Self-Evolving NPC Ecosystem
+# Smallville 2 — Self-Evolving NPC Ecosystem 
 
 ## Overview
 A browser-playable 3D world populated with AI-driven NPCs that have persistent memory,
