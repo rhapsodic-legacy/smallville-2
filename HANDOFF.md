@@ -222,24 +222,31 @@ aligns with the project's "95-99% on the utility layer" direction in
 
 ---
 
-## Open issues / measurement-tool bugs (not yet fixed)
+## Open issues / measurement-tool bugs
 
-- **The bridge-objector C1 "voiced dissent" judge under-counts.** On Run 2
-  it scored 0 opposition lines and printed `META-VERDICT: INVALID — wiring
-  bug` — but the objector's dialogue plainly opposes the repair (proven by
-  reading his now-reliable memory). The `self_concept → prompt` path is
-  fine; the **LLM opposition-judge** is the unreliable part. Do NOT trust a
-  C1=0 / INVALID verdict at face value; read the dialogue. Worth hardening
-  the judge (or replacing it with the Stage 1.5 stance read).
-- **Throttle-induced canned dialogue is silent in the metrics.** The
-  sentiment trajectory looks healthy even when most dialogue is canned
-  fallback. The Stage 1.5 "MOST-REPEATED THOUGHTS" section is the current
-  canary (canned strings dominating = a throttled, invalid run). Gemma
-  removes the cause.
+> **Update 2026-06-17 (post-handoff audit, PR #7):** the first two issues
+> below are FIXED, plus two more found and fixed:
+> - C1 is now judged by a **deterministic speaker-attributed scan** over
+>   ALL dialogue (the LLM judge's false zeros were mechanical: first-15
+>   newest-first sampling atop a limit-400 read + 400-char truncation).
+>   Validated: finds 29 dissent lines on the 30-day dump where the old
+>   judge said 0.
+> - Canned fallback lines now carry a **`fallback` provenance flag** into
+>   memory, are marked `[canned]` in the journal files, and the Stage 1.5
+>   summary prints a **run-validity canary** ("canned/fallback lines: N").
+> - **Dumps were silently capped at 5000/NPC** — the 30-day dump was
+>   missing days 1–15 entirely. Now uncapped.
+> - **Daily-bucket journal files** now exist: with `--dump`, every memory
+>   is appended on write to `<dump>_memories/<npc_id>.txt` (day-headed,
+>   human-readable) — crash-safe and mid-run tailable.
+
 - **ChromaDB retrieval-gap root cause was never found** — but it no longer
   matters: the store that exhibited it is deleted. The investigation
   (reproductions that ruled out scale / embeddings / tombstones / deletes)
   is recorded in `VECTORIZATION_ROADMAP.md` for posterity.
+- **Unswept conversation turns** (~28k in the throttled run) — likely
+  conversations that died mid-throttle before consolidation. Recheck the
+  turn counts in the first clean Gemma run's summary before chasing.
 
 ---
 
