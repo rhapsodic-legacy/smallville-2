@@ -15,7 +15,9 @@ tiered cognition, and evolutionary dynamics.
 ### Tech Stack
 - **Backend:** Python 3.11+ / FastAPI / WebSocket
 - **Frontend:** Three.js (procedural 3D geometry) / vanilla JS
-- **Databases:** SQLite (structured NPC state) + ChromaDB (episodic memory embeddings)
+- **Databases:** SQLite (structured NPC state) + simple in-memory text
+  store for episodic memory, with daily-bucket journal files on dumped
+  runs (ChromaDB removed 2026-06 — see HANDOFF.md)
 - **LLM:** Claude API (Haiku for NPCs, Opus for overseer) via Anthropic SDK
 - **Protocol:** Server-authoritative — all game logic in Python, browser is thin renderer
 
@@ -24,7 +26,7 @@ tiered cognition, and evolutionary dynamics.
 core/           — smallville_core library (importable package)
   world/        — spatial grid, procedural town generator, pathfinding
   npc/          — NPC data model, tiered cognition (perceive/retrieve/plan/reflect/execute)
-  memory/       — hybrid memory (SQLite knowledge graph + ChromaDB embeddings)
+  memory/       — hybrid memory (SQLite knowledge graph + plain-text episodic store)
   relationships/— sentiment dimensions, factions, formal structures
   events/       — event impact system (hard coded, conditional, boolean triggers)
   economy/      — gold, resources, trading, construction, crafting
@@ -42,8 +44,10 @@ tests/          — unit, integration, simulation tests
 - **Tiered Cognition:** NPCs get different levels of AI reasoning based on proximity
   and relevance: Tier 1 (full LLM), Tier 2 (simplified LLM), Tier 3 (state machine),
   Tier 4 (frozen).
-- **Hybrid Memory:** Knowledge graph for hard facts + embedding retrieval for episodic
-  memory. Upgraded from Stanford's pure-embedding approach.
+- **Hybrid Memory:** Knowledge graph for hard facts + a plain-text episodic
+  store read by recency/importance/keyword. Deliberately simple: it just
+  stores every thought and reads them back (bucketed journal files on
+  dumped runs); nothing is hidden, nothing can silently vanish.
 - **Event Impact System:** Data-driven rules table mapping events to effects.
   Supports hard coded, conditional, and boolean/narrative triggers.
   Works at individual level (engagement ring) and population level (war = True).

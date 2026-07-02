@@ -37,6 +37,11 @@ class ConversationExchange:
     speaker_id: str
     speaker_name: str
     message: str
+    # True when the line is a canned fallback (LLM call failed or a
+    # non-LLM tier spoke) rather than generated dialogue. Propagated
+    # into memory metadata so summaries can count canned lines and a
+    # throttled/hiccuping run is legible instead of silently polluted.
+    fallback: bool = False
 
 
 @dataclass
@@ -62,11 +67,13 @@ class Conversation:
     # `clear_finished_conversations` also removes persisted convos.
     persisted: bool = False
 
-    def add_exchange(self, speaker_id: str, speaker_name: str, message: str) -> None:
+    def add_exchange(self, speaker_id: str, speaker_name: str,
+                     message: str, fallback: bool = False) -> None:
         self.exchanges.append(ConversationExchange(
             speaker_id=speaker_id,
             speaker_name=speaker_name,
             message=message,
+            fallback=fallback,
         ))
 
     def to_dict(self) -> dict:
@@ -233,6 +240,7 @@ async def initiate_conversation(
 
     conv = Conversation(npc_a_id=npc.npc_id, npc_b_id=other.npc_id)
 
+    used_fallback = False
     if config.uses_llm:
         try:
             # Pull relationship context from memory if available
@@ -278,10 +286,12 @@ async def initiate_conversation(
         except Exception as e:
             logger.warning("Conversation initiation failed for %s: %s", npc.name, e)
             message = _fallback_greeting(npc)
+            used_fallback = True
     else:
         message = _fallback_greeting(npc)
+        used_fallback = True
 
-    conv.add_exchange(npc.npc_id, npc.name, message)
+    conv.add_exchange(npc.npc_id, npc.name, message, fallback=used_fallback)
 
     # Move both NPCs to adjacent tiles before they start talking
     if grid is not None and all_npcs is not None:
@@ -421,6 +431,7 @@ async def continue_conversation(
     # the prompt.
     recent_history = _format_recent_history(conv.exchanges)
 
+    used_fallback = False
     use_llm = config.uses_llm or force_llm
     if use_llm:
         # Pull relationship context if available (cheap; errors
@@ -480,10 +491,12 @@ async def continue_conversation(
                 )
                 raise
             message = _fallback_response(npc)
+            used_fallback = True
     else:
         message = _fallback_response(npc)
+        used_fallback = True
 
-    conv.add_exchange(npc.npc_id, npc.name, message)
+    conv.add_exchange(npc.npc_id, npc.name, message, fallback=used_fallback)
 
     if allow_auto_end:
         # Random chance to end after each exchange (increases with count)
@@ -606,7 +619,8 @@ async def end_conversation(
                     npc_a_name=npc.name,
                     npc_b_name=other.name,
                     exchanges=[
-                        {"speaker": e.speaker_name, "message": e.message}
+                        {"speaker": e.speaker_name, "message": e.message,
+                         "fallback": e.fallback}
                         for e in conv.exchanges
                     ],
                     game_time=current_game_minutes,

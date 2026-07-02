@@ -533,6 +533,7 @@ async def reflect_on_conversation(
             npc_id=npc.npc_id,
             insight=insight,
             game_time=current_game_time,
+            fallback=True,
         )
         return insight
 

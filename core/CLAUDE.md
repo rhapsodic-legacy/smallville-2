@@ -38,7 +38,8 @@ state = world.get_state()  # full serialisable state for client
 
 ### memory/
 - SQLite structured storage (facts, relationships, goals)
-- ChromaDB episodic memory (embeddings with recency/importance/relevance scoring)
+- Episodic memory: simple in-memory text store (recency/importance/keyword
+  scoring; optional daily-bucket journal files — ChromaDB removed 2026-06)
 - Memory manager (unified retrieval combining both stores)
 - Reflection system (importance accumulator, focal points, insight synthesis)
 - Spatial memory (hierarchical world knowledge tree)

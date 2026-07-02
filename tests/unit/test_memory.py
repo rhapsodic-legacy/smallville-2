@@ -467,3 +467,103 @@ class TestMemoryManager:
         )
         facts = memory_mgr.structured.get_facts("npc_1", subject="Alice")
         assert any(f.predicate == "is_a" and f.obj == "blacksmith" for f in facts)
+
+
+class TestDailyBucketJournal:
+    """The daily-bucket journal: every memory appended to a per-NPC,
+    day-headed text file at write time — crash-safe and mid-run
+    readable. Never breaks the sim on I/O failure."""
+
+    def test_journals_day_headed_lines(self, tmp_path):
+        store = EpisodicStore(persist_directory=str(tmp_path))
+        store.initialise()
+        store.add_memory("bran", "Saw the forge lit.", category="observation",
+                         game_time=1440.0 + 90)          # day 1, 01:30
+        store.add_memory("bran", "Spoke with Mira.", category="conversation",
+                         game_time=1440.0 + 200)         # day 1
+        store.add_memory("bran", "Reflection: a good day.",
+                         category="reflection",
+                         game_time=2 * 1440.0 + 30)      # day 2 -> new header
+        text = (tmp_path / "bran.txt").read_text()
+        assert "=== day 1 ===" in text
+        assert "=== day 2 ===" in text
+        assert "[d1 01:30] [observation] Saw the forge lit." in text
+        assert text.index("=== day 1 ===") < text.index("=== day 2 ===")
+
+    def test_separate_file_per_npc(self, tmp_path):
+        store = EpisodicStore(persist_directory=str(tmp_path))
+        store.initialise()
+        store.add_memory("bran", "a", game_time=10)
+        store.add_memory("mira", "b", game_time=10)
+        assert (tmp_path / "bran.txt").exists()
+        assert (tmp_path / "mira.txt").exists()
+
+    def test_canned_lines_marked_in_journal(self, tmp_path):
+        store = EpisodicStore(persist_directory=str(tmp_path))
+        store.initialise()
+        store.add_memory("bran", "Indeed, quite so.",
+                         category="conversation_turn", game_time=10,
+                         extra_metadata={"fallback": True})
+        assert "[canned] Indeed, quite so." in (tmp_path / "bran.txt").read_text()
+
+    def test_no_dir_no_files_no_crash(self, tmp_path):
+        store = EpisodicStore()  # no persist_directory
+        store.initialise()
+        store.add_memory("bran", "a", game_time=10)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_journal_failure_never_breaks_add(self, tmp_path):
+        store = EpisodicStore(persist_directory=str(tmp_path))
+        store.initialise()
+        store._persist_dir = str(tmp_path / "now_a_file")
+        (tmp_path / "now_a_file").write_text("block the dir path")
+        mid = store.add_memory("bran", "still stored", game_time=10)
+        assert store.get_by_id(mid) is not None       # store unaffected
+        assert store._persist_dir is None             # journaling disabled
+
+
+class TestFallbackProvenance:
+    """Canned fallback lines carry provenance into memory so summaries
+    can count them (run-validity canary)."""
+
+    async def test_fallback_reflection_flagged(self, memory_mgr):
+        await memory_mgr.record_reflection(
+            npc_id="bran", insight="canned thought", game_time=5.0,
+            fallback=True,
+        )
+        mems = memory_mgr.episodic.get_recent("bran", limit=5)
+        assert mems and mems[0].metadata.get("fallback") is True
+
+    async def test_normal_reflection_unflagged(self, memory_mgr):
+        await memory_mgr.record_reflection(
+            npc_id="bran", insight="real thought", game_time=5.0,
+        )
+        mems = memory_mgr.episodic.get_recent("bran", limit=5)
+        assert mems and not mems[0].metadata.get("fallback")
+
+    async def test_fallback_turn_and_conversation_flagged(self, memory_mgr):
+        exchanges = [
+            {"speaker": "Bran", "message": "Real line about timber.",
+             "fallback": False},
+            {"speaker": "Mira", "message": "Indeed, quite so.",
+             "fallback": True},
+        ]
+        for ex in exchanges:
+            await memory_mgr.persist_conversation_turn(
+                conversation_id="c1", npc_a_id="bran", npc_b_id="mira",
+                npc_a_name="Bran", npc_b_name="Mira",
+                exchange=ex, game_time=10.0,
+            )
+        await memory_mgr.record_conversation(
+            npc_a_id="bran", npc_b_id="mira",
+            npc_a_name="Bran", npc_b_name="Mira",
+            exchanges=exchanges, game_time=10.0,
+        )
+        bran = memory_mgr.episodic.get_recent("bran", limit=20)
+        turns = [m for m in bran if m.category == "conversation_turn"]
+        flagged = [m for m in turns if m.metadata.get("fallback")]
+        unflagged = [m for m in turns if not m.metadata.get("fallback")]
+        assert len(flagged) == 1 and "quite so" in flagged[0].description
+        assert len(unflagged) == 1
+        convs = [m for m in bran if m.category == "conversation"]
+        assert convs and convs[0].metadata.get("fallback_turns") == 1
