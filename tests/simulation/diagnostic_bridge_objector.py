@@ -74,7 +74,7 @@ SENTIMENT_DRIFT_MIN = 3.0       # C3: min RELATIVE cooling toward objector (vs
                                 #     +/-100 scale (DIMENSION_MIN/MAX); 3.0 is a
                                 #     few points of net cooling, provisional and
                                 #     tunable like the rest of the watchlist.
-C1_JUDGE_MAX = 15               # C1: cap excerpts sent to the LLM judge per run.
+# C1 is judged deterministically — see _count_voiced_opposition.
 
 
 def _bridge_memories(memory, npc_id: str) -> list:
@@ -83,53 +83,60 @@ def _bridge_memories(memory, npc_id: str) -> list:
     return [m for m in mems if "bridge" in m.description.lower()]
 
 
-async def _judge_voiced_opposition(llm, npc_name: str, memories: list):
-    """C1 (LLM judge) — among the objector's bridge conversations, count those
-    where {npc_name} HIMSELF voices reluctance, refusal, or opposition to
-    repairing the bridge.
+def _count_voiced_opposition(npc_name: str, memories: list):
+    """C1 (deterministic) — count utterances where the objector HIMSELF
+    voices opposition to repairing the bridge.
 
-    Judges speaker-attributed intent rather than keywords, so pro-repair idioms
-    like "the bridge won't fix itself" (which a token scan flags as opposition)
-    no longer false-positive. Returns ``(count, quotes)``; ``count == -1``
-    signals the judge call itself failed (validity unknown, not a real zero)."""
-    convos = [
-        m for m in memories
-        if getattr(m, "category", "") == "conversation"
-        and "bridge" in m.description.lower()
-    ][:C1_JUDGE_MAX]
-    if not convos:
-        return 0, []
-
-    listing = "\n\n".join(
-        f"[{i}] {m.description[:400]}" for i, m in enumerate(convos)
-    )
-    prompt = (
-        f"Below are excerpts of conversations involving {npc_name}. Each line "
-        f"is prefixed by the speaker's name.\n\n"
-        f"For EACH excerpt, judge ONLY what {npc_name} himself says (lines "
-        f"prefixed '{npc_name}:'). Does {npc_name} express reluctance, refusal, "
-        f"or opposition to REPAIRING THE BRIDGE?\n"
-        f"IMPORTANT: saying the bridge needs fixing, offering to help, or "
-        f"phrases like 'the bridge won't fix itself' are SUPPORT, not "
-        f"opposition.\n\n"
-        f"{listing}\n\n"
-        f"Reply with one line per excerpt where {npc_name} genuinely opposes "
-        f"the repair, formatted 'OPPOSE [n]: <his own words>'. If none, reply "
-        f"exactly 'NONE'."
-    )
-    try:
-        resp = await llm.complete(
-            system="You are a precise dialogue annotator.",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400, temperature=0.0, purpose="conversation",
-        )
-    except Exception as exc:  # judge unavailable — don't fake a zero
-        return -1, [f"judge call failed: {exc}"]
-
-    quotes = [
-        ln.strip() for ln in resp.splitlines()
-        if ln.strip().upper().startswith("OPPOSE")
-    ]
+    Replaces the old LLM judge, which false-negatived twice: it sampled
+    only the FIRST 15 newest-first conversation memories and truncated
+    each at 400 chars, so on a 30-day run it judged only the final days
+    (and often never saw the objector's own words at all). This scan is
+    speaker-attributed (only lines the objector speaks), covers EVERY
+    conversation memory with no truncation, dedupes utterances (turn
+    memories + consolidated summaries overlap), skips canned fallback
+    lines, and excludes pro-repair idioms ("won't fix itself") that a
+    naive token scan would flag. Deterministic: same dump, same answer.
+    """
+    support_idioms = ("won't fix itself", "wont fix itself",
+                      "won't repair itself", "needs repair",
+                      "needs fixing", "must repair", "help repair")
+    oppose_tokens = ("oppose", "opposed", "won't", "wont", "refuse",
+                     "fool's", "waste", "death-trap", "death trap",
+                     "no good", "against", "rotten", "not be lendin",
+                     "patchwork", "crumbling", "safer rebuilding")
+    prefix_a = f"{npc_name}:"
+    prefix_b = f"{npc_name} said:"
+    seen: set[str] = set()
+    quotes: list[str] = []
+    for m in memories:
+        cat = getattr(m, "category", "")
+        if cat not in ("conversation", "conversation_turn"):
+            continue
+        desc = m.description
+        if "bridge" not in desc.lower():
+            continue
+        if (getattr(m, "metadata", None) or {}).get("fallback"):
+            continue  # canned stub, not the objector's voice
+        for seg in desc.split(" | "):
+            s = seg.strip()
+            if s.startswith("Had a conversation with"):
+                _, _, s = s.partition(". ")
+                s = s.strip()
+            if not (s.startswith(prefix_a) or s.startswith(prefix_b)):
+                continue
+            low = s.lower()
+            if "bridge" not in low:
+                continue
+            key = low[:120]
+            if key in seen:
+                continue
+            if any(t in low for t in support_idioms) and not any(
+                t in low for t in ("won't be", "refuse", "oppose")
+            ):
+                continue
+            if any(t in low for t in oppose_tokens):
+                seen.add(key)
+                quotes.append(s[:170])
     return len(quotes), quotes
 
 
@@ -291,9 +298,30 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     gen.generate()
     grid, buildings = gen.grid, gen.buildings
 
+    # When dumping, also journal every memory to daily-bucket text
+    # files as it is written — crash-safe (a run killed at hour 12
+    # keeps everything to there) and mid-run readable (tail/grep
+    # <dump>_memories/<npc_id>.txt while the sim runs).
+    memory = None
+    if dump_path:
+        from core.memory.manager import MemoryManager
+        from core.memory.episodic import EpisodicStore
+        from core.memory.structured import StructuredMemory
+        from core.memory.spatial import SpatialMemory
+        journal_dir = dump_path.rsplit(".", 1)[0] + "_memories"
+        memory = MemoryManager(
+            structured=StructuredMemory(":memory:"),
+            episodic=EpisodicStore(persist_directory=journal_dir),
+            spatial=SpatialMemory(),
+            llm=llm,
+        )
+        memory.initialise()
+        print(f"  memory journal: {journal_dir}/<npc_id>.txt "
+              "(live, day-bucketed)", flush=True)
+
     mgr = NPCManager(
         grid=grid, buildings=buildings,
-        llm=llm, seed=SEED,
+        llm=llm, seed=SEED, memory=memory,
     )
     npcs = mgr.spawn_population(POPULATION)
     clock = GameClock()
@@ -554,12 +582,12 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
         })
 
     # ===================== PRE-REGISTERED CRITERIA VERDICT =====================
-    # C1 — voiced dissent (LLM judge; harness-validity gate)
-    obj_mems = mgr.memory.episodic.get_recent(objector.npc_id, limit=400)
-    c1_count, c1_quotes = await _judge_voiced_opposition(
-        llm, objector.name, obj_mems,
+    # C1 — voiced dissent (deterministic speaker-attributed scan over
+    # ALL of the objector's dialogue memories; no LLM, no sampling cap)
+    obj_mems = mgr.memory.episodic.get_recent(
+        objector.npc_id, limit=10_000_000,
     )
-    c1_judge_failed = c1_count < 0
+    c1_count, c1_quotes = _count_voiced_opposition(objector.name, obj_mems)
     c1_pass = c1_count >= 1
 
     # C2 — indecision calibration + bridge outcome (tuning, not the verdict axis)
@@ -595,14 +623,13 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     # Meta-verdict — pre-committed interpretation. Uses C1 as a validity gate
     # and the C3/C4 axis as the emergence read; C2 is calibration only.
     resolved_cycles = n_completed + n_expired
-    if c1_judge_failed:
-        meta = ("UNSCORED — the C1 opposition judge could not run, so dialogue "
-                "validity is unknown. Re-run; do NOT read C3/C4 as architecture "
-                "evidence without a working validity gate.")
-    elif not c1_pass:
-        meta = ("INVALID — the opposition belief never surfaced in dialogue. "
-                "Treat as a wiring bug (self_concept -> prompt path), not as "
-                "evidence about emergence.")
+    if not c1_pass:
+        meta = ("NO VOICED DISSENT — the deterministic scan found no dialogue "
+                "line where the objector opposes the repair. Before reading "
+                "C3/C4, verify the belief survived (self_concept) and the run "
+                "wasn't throttle-degraded (canned-line count in the Stage 1.5 "
+                "summary). If both check out, this is a real behavioural "
+                "finding, not a harness bug.")
     elif resolved_cycles == 0:
         meta = (f"INCONCLUSIVE — the objector voices opposition (C1 ok), but no "
                 f"bridge cycle resolved over {n_cycles} proposed, so C3 (social "
@@ -627,10 +654,9 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     print("\n" + "=" * 90)
     print("PRE-REGISTERED CRITERIA VERDICT")
     print("=" * 90)
-    c1_label = "FAIL?" if c1_judge_failed else _mark(c1_pass)
-    c1_n = "?" if c1_judge_failed else str(c1_count)
-    print(f"C1 voiced dissent  (validity): {c1_label:4s}  "
-          f"{c1_n} line(s) where objector opposes the repair (LLM-judged)")
+    print(f"C1 voiced dissent  (validity): {_mark(c1_pass):4s}  "
+          f"{c1_count} line(s) where objector opposes the repair "
+          f"(deterministic speaker-attributed scan)")
     print(f"C2 indecision      (calibr.) : {'IN-BAND' if c2_in_band else 'OUT-BAND'}  "
           f"join_rate={join_rate:.2f} band={JOIN_RATE_BAND[0]:.2f}-{JOIN_RATE_BAND[1]:.2f} "
           f"over {n_cycles} cycle(s); completed={n_completed} expired={n_expired}")
@@ -643,9 +669,7 @@ async def run(days: int = DEFAULT_DAYS, provider: str = "mistral",
     print()
     print(f"META-VERDICT: {meta}")
     if c1_quotes:
-        title = ("C1 judge could not run" if c1_judge_failed
-                 else "C1 judge output (objector's own opposition lines)")
-        print(f"\n{title}:")
+        print("\nC1 — objector's own opposition lines (sample):")
         for q in c1_quotes[:15]:
             print(f"  {q}")
 

@@ -32,12 +32,15 @@ def dump_run_state(mgr, npcs, meta: dict, path: str) -> str:
     id_to_name = {n.npc_id: n.name for n in npcs}
     out = {"meta": meta, "npcs": []}
     for n in npcs:
+        # No cap. limit=5000 silently discarded the first ~15 days of a
+        # 30-day run (newest-first) — the store's "full picture" promise
+        # has to hold at the dump too. Text is cheap; keep everything.
         try:
             mems = mgr.memory.episodic.get_recent(
-                n.npc_id, limit=5000, include_compacted=True,
+                n.npc_id, limit=10_000_000, include_compacted=True,
             )
         except TypeError:
-            mems = mgr.memory.episodic.get_recent(n.npc_id, limit=5000)
+            mems = mgr.memory.episodic.get_recent(n.npc_id, limit=10_000_000)
         sentiments = []
         try:
             for s in mgr.sentiment.get_all_for(n.npc_id):
@@ -71,6 +74,14 @@ def dump_run_state(mgr, npcs, meta: dict, path: str) -> str:
                 "importance": round(float(getattr(m, "importance", 0.0)), 3),
                 "game_time": getattr(m, "game_time", 0),
                 "tags": sorted(getattr(m, "tags", []) or []),
+                # Canned-line provenance (only present when set).
+                **({"fallback": True}
+                   if (getattr(m, "metadata", None) or {}).get("fallback")
+                   else {}),
+                **({"fallback_turns":
+                    (getattr(m, "metadata", None) or {})["fallback_turns"]}
+                   if (getattr(m, "metadata", None) or {}).get("fallback_turns")
+                   else {}),
             } for m in mems],
         })
     p = pathlib.Path(path)
@@ -284,9 +295,23 @@ def summarise_run(path: str, out_path: str | None = None) -> str:
     for n in npcs:
         cat.update(m["category"] for m in n["memories"])
     disp = [s["disposition"] for n in npcs for s in n["sentiments"]]
+    # Canned-line provenance: fallback-flagged turns/reflections plus
+    # fallback_turns counts folded into consolidated conversations.
+    canned = sum(
+        1 for n in npcs for m in n["memories"] if m.get("fallback")
+    ) + sum(
+        m.get("fallback_turns", 0) for n in npcs for m in n["memories"]
+    )
+    dialogue_mems = sum(
+        1 for n in npcs for m in n["memories"]
+        if m["category"] in ("conversation_turn", "conversation")
+    )
     emit("\nTOWN")
     emit(f"  memories: {total_mem} total, {total_mem/max(len(npcs),1):.0f}/NPC")
     emit(f"  by category: {dict(cat.most_common())}")
+    emit(f"  canned/fallback lines: {canned}"
+         + (f" (~{canned/dialogue_mems:.0%} of {dialogue_mems} dialogue "
+            f"memories) — run-validity canary" if dialogue_mems else ""))
     if disp:
         emit(f"  relationships: {len(disp)}, mean disposition "
              f"{sum(disp)/len(disp):+.1f}, "
@@ -341,6 +366,7 @@ def summarise_run(path: str, out_path: str | None = None) -> str:
         "mean_disposition": round(sum(disp)/len(disp), 1) if disp else 0,
         "zero_memory_npcs": sum(1 for n in npcs if n["n_memories"] == 0),
         "town_repeats": len(rep),
+        "canned_lines": canned,
     }))
     emit(bar)
 

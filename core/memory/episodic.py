@@ -132,8 +132,14 @@ class EpisodicStore:
     for) — nothing is hidden. Reading is a list comprehension; it
     cannot silently lose memories.
 
-    `persist_directory` / `fallback_only` are accepted for backward
-    compatibility and ignored — there is only the one simple store now.
+    `persist_directory` (optional): when set, every memory is ALSO
+    appended on write to a human-readable daily-bucket journal — one
+    text file per NPC, day-headed sections, one line per memory. This
+    makes a long run crash-safe (everything up to the crash is on
+    disk) and mid-run readable (tail/grep the files while it runs).
+    The journal is write-only; the in-memory dict remains the store
+    the sim reads from. `fallback_only` is accepted for backward
+    compatibility and ignored.
     """
 
     def __init__(
@@ -147,9 +153,62 @@ class EpisodicStore:
         self._counter = 0
         # Per-NPC, per-tag -> set of memory_ids, for O(1) tag lookup.
         self._tag_index: dict[str, dict[str, set[str]]] = {}
+        # Journal state: last day-header written per NPC, and a
+        # one-shot flag so journal I/O errors warn once, not 50k times.
+        self._journal_day: dict[str, int] = {}
+        self._journal_warned = False
 
     def initialise(self) -> None:
-        logger.info("Episodic memory initialised (in-memory text store)")
+        if self._persist_dir:
+            from pathlib import Path
+            try:
+                Path(self._persist_dir).mkdir(parents=True, exist_ok=True)
+                logger.info(
+                    "Episodic memory initialised (in-memory text store, "
+                    "journaling to %s)", self._persist_dir,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Journal dir %s unusable (%s) — journaling disabled",
+                    self._persist_dir, e,
+                )
+                self._persist_dir = None
+        else:
+            logger.info("Episodic memory initialised (in-memory text store)")
+
+    def _journal(self, mem: EpisodicMemory) -> None:
+        """Append one memory to the NPC's daily-bucket text file.
+
+        Never allowed to break the sim — any I/O failure logs one
+        warning and journaling is skipped from then on.
+        """
+        if not self._persist_dir:
+            return
+        try:
+            day = int(mem.game_time // 1440)
+            minutes = int(mem.game_time % 1440)
+            body = mem.description.replace("\n", "\n    ")
+            canned = ""
+            if mem.metadata.get("fallback") or mem.metadata.get("fallback_turns"):
+                canned = "[canned] "
+            line = (
+                f"[d{day} {minutes // 60:02d}:{minutes % 60:02d}] "
+                f"[{mem.category}] {canned}{body}\n"
+            )
+            if self._journal_day.get(mem.npc_id) != day:
+                self._journal_day[mem.npc_id] = day
+                line = f"\n=== day {day} ===\n" + line
+            path = f"{self._persist_dir}/{mem.npc_id}.txt"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception as e:
+            if not self._journal_warned:
+                self._journal_warned = True
+                logger.warning(
+                    "Memory journal write failed (%s) — journaling "
+                    "disabled for the rest of the run", e,
+                )
+            self._persist_dir = None
 
     def _next_id(self, npc_id: str) -> str:
         self._counter += 1
@@ -208,6 +267,7 @@ class EpisodicStore:
             bucket = self._tag_index.setdefault(npc_id, {})
             for tag in tag_set:
                 bucket.setdefault(tag, set()).add(memory_id)
+        self._journal(self._memories[memory_id])
         return memory_id
 
     def _for_npc(self, npc_id: str) -> list[EpisodicMemory]:

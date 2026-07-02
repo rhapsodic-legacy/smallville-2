@@ -331,6 +331,8 @@ class MemoryManager:
                     "speaker": speaker,
                     "partner_a": npc_a_name,
                     "partner_b": npc_b_name,
+                    # Canned-line provenance (see ConversationExchange.fallback)
+                    **({"fallback": True} if exchange.get("fallback") else {}),
                 },
             )
             memory_ids.append(memory_id)
@@ -372,6 +374,7 @@ class MemoryManager:
                     exchange={
                         "speaker": ex.speaker_name,
                         "message": ex.message,
+                        "fallback": getattr(ex, "fallback", False),
                     },
                     game_time=game_time,
                     location_x=location_x,
@@ -427,6 +430,9 @@ class MemoryManager:
             for e in exchanges
         )
         summary = f"Conversation between {npc_a_name} and {npc_b_name}: {exchange_text}"
+        # Canned-line provenance: how many of this conversation's lines
+        # were fallback stubs rather than generated dialogue.
+        fallback_turns = sum(1 for e in exchanges if e.get("fallback"))
 
         # Record event
         self.structured.record_event(
@@ -454,6 +460,10 @@ class MemoryManager:
                 game_time=game_time,
                 location_x=location_x,
                 location_z=location_z,
+                extra_metadata=(
+                    {"fallback_turns": fallback_turns}
+                    if fallback_turns else None
+                ),
             )
             self._emit_memory_event(
                 npc_id, 0.6, "conversation", convo_description,
@@ -1194,14 +1204,19 @@ class MemoryManager:
         npc_id: str,
         insight: str,
         game_time: float = 0.0,
+        fallback: bool = False,
     ) -> str:
-        """Store a reflection as a high-importance episodic memory."""
+        """Store a reflection as a high-importance episodic memory.
+
+        `fallback=True` marks a canned template reflection (LLM call
+        failed) so summaries can count them."""
         memory_id = self.episodic.add_memory(
             npc_id=npc_id,
             description=f"Reflection: {insight}",
             category="reflection",
             importance=0.8,
             game_time=game_time,
+            extra_metadata={"fallback": True} if fallback else None,
         )
         self._last_reflection_time[npc_id] = game_time
         return memory_id

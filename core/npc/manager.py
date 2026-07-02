@@ -1279,7 +1279,8 @@ class NPCManager:
                 continue
 
             exchanges = [
-                {"speaker": e.speaker_name, "message": e.message}
+                {"speaker": e.speaker_name, "message": e.message,
+                 "fallback": getattr(e, "fallback", False)}
                 for e in conv.exchanges
             ]
 
