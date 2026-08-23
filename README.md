@@ -1,5 +1,5 @@
  # Smallville 2 — a self-evolving NPC ecosystem                                                                                                                                                                                                                                                                                                                                                                                                                                                                           
- 
+  
 A browser-playable 3D world populated by AI-driven NPCs that have persistent
 memory, goals, relationships, occupations and resource needs. They follow
 daily routines, talk to one another, trade, form factions, take on town
