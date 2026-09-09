@@ -1,4 +1,4 @@
-  # Smallville 2 — a self-evolving NPC ecosystem                                                                                                                                                                                                                                                                                                                                         
+  # Smallville 2 — a self-evolving NPC ecosystem                                                                                                                                                                                                                                                                                                                                          
    
 
   
